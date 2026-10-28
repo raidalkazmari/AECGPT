@@ -37,6 +37,12 @@ targets:
           - UIInterfaceOrientationPortrait
         UIRequiredDeviceCapabilities:
           - arm64
+        # بدون هذه الأسطر يغلق iOS التطبيق فورًا عند طلب الكاميرا أو المايكروفون
+        NSCameraUsageDescription: "لتصوير صورة وإرسالها في محادثة ChatGPT."
+        NSMicrophoneUsageDescription: "للتحدث مع ChatGPT بالصوت أو الإملاء."
+        NSPhotoLibraryUsageDescription: "لاختيار صورة من الصور وإرسالها في المحادثة."
+        NSPhotoLibraryAddUsageDescription: "لحفظ الصور التي ينشئها ChatGPT في الصور."
+        NSLocationWhenInUseUsageDescription: "إذا طلب ChatGPT موقعك للإجابة عن سؤال."
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:
