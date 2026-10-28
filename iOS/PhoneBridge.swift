@@ -61,8 +61,20 @@ final class PhoneBridge: NSObject, ObservableObject {
     // MARK: - من الصفحة
 
     fileprivate func receive(_ body: Any) {
-        guard let dict = body as? [String: Any],
-              let rawMessages = dict["messages"] as? [[String: Any]] else { return }
+        guard let dict = body as? [String: Any] else { return }
+
+        // السكربت لم يجد الرسائل: نعرض وصف الصفحة على الساعة للتشخيص
+        if let diagnostic = dict["diagnostic"] as? String {
+            let snapshot = ChatSnapshot(title: "تشخيص",
+                                        messages: [ChatMessage(id: "diagnostic", role: "assistant", text: diagnostic)],
+                                        streaming: false,
+                                        stamp: Date().timeIntervalSince1970)
+            latest = snapshot
+            push(snapshot)
+            return
+        }
+
+        guard let rawMessages = dict["messages"] as? [[String: Any]] else { return }
 
         let messages: [ChatMessage] = rawMessages.compactMap { raw in
             guard let id = raw["id"] as? String,
