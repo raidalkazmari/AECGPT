@@ -1,0 +1,73 @@
+# ملف إعداد المشروع. GitHub يحوّله تلقائيًا إلى مشروع Xcode (عبر XcodeGen).
+name: AECGPT
+
+options:
+  bundleIdPrefix: com.aecgpt
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "16.0"
+    watchOS: "9.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+targets:
+  AECGPT:
+    type: application
+    platform: iOS
+    sources:
+      - path: iOS
+        excludes:
+          - "bridge.js"
+      - path: iOS/bridge.js
+        buildPhase: resources
+      - path: Shared
+    info:
+      path: iOS/Info.plist
+      properties:
+        CFBundleDisplayName: AECGPT
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arm64
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aecgpt.app
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      # تطبيق الساعة مدمج داخل تطبيق الجوال، فيُثبَّت معه تلقائيًا
+      - target: AECGPTWatch
+        embed: true
+        codeSign: false
+        copy:
+          destination: productsDirectory
+          subpath: $(CONTENTS_FOLDER_PATH)/Watch
+    scheme: {}
+
+  AECGPTWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Watch
+      - path: Shared
+    info:
+      path: Watch/Info.plist
+      properties:
+        CFBundleDisplayName: AECGPT
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.aecgpt.app
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aecgpt.app.watchkitapp
+        TARGETED_DEVICE_FAMILY: "4"
+        SKIP_INSTALL: YES

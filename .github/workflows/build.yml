@@ -1,0 +1,64 @@
+name: Build AECGPT
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build iPhone + Watch (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project AECGPT.xcodeproj \
+            -scheme AECGPT \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/AECGPT.xcarchive" \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Verify app contents
+        run: |
+          APP="$RUNNER_TEMP/AECGPT.xcarchive/Products/Applications/AECGPT.app"
+          test -d "$APP" || { echo "::error::iPhone app was not produced"; exit 1; }
+          test -f "$APP/bridge.js" || { echo "::error::bridge.js missing from app"; exit 1; }
+          test -d "$APP/Watch/AECGPTWatch.app" || { echo "::error::Watch app is not embedded"; exit 1; }
+          echo "✅ iPhone app + Watch app are OK"
+
+      - name: Package IPA
+        run: |
+          mkdir -p out/Payload
+          cp -R "$RUNNER_TEMP/AECGPT.xcarchive/Products/Applications/AECGPT.app" out/Payload/
+          cd out && zip -qry AECGPT.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AECGPT-ipa
+          path: out/AECGPT.ipa
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
