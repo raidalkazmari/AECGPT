@@ -31,11 +31,12 @@ final class PhoneBridge: NSObject, ObservableObject {
         config.userContentController = controller
         config.websiteDataStore = .default()   // يحفظ تسجيل الدخول
         config.allowsInlineMediaPlayback = true
+        // يعرّف نفسه كـ Safari بنفس إصدار iOS الذي في جوالك، فيعرض الموقع نفس واجهة Safari
+        let version = UIDevice.current.systemVersion.split(separator: ".").prefix(2).joined(separator: ".")
+        config.applicationNameForUserAgent = "Version/\(version) Mobile/15E148 Safari/604.1"
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
-        webView.customUserAgent =
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 
         super.init()
         handler.owner = self
