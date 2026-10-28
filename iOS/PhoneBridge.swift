@@ -1,19 +1,14 @@
 import UIKit
 import WebKit
-import WatchConnectivity
 
 /// قلب تطبيق الجوال: يعرض chatgpt.com، يستقبل المحادثة من السكربت،
-/// ويرسلها للساعة بطريقتين معًا:
-/// 1) فورًا إذا كانت الساعة مفتوحة (sendMessage)
-/// 2) نسخة محفوظة تصل للساعة حتى لو كانت نائمة (applicationContext)
+/// ويسلّمها لـ WatchLink ليرسلها للساعة.
 @MainActor
 final class PhoneBridge: NSObject, ObservableObject {
     let webView: WKWebView
 
     private let home = "https://chatgpt.com"
     private let lastPathKey = "lastConversationPath"
-    private var latest: ChatSnapshot = .empty
-    private var lastContextPush = Date.distantPast
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     override init() {
@@ -42,11 +37,6 @@ final class PhoneBridge: NSObject, ObservableObject {
         handler.owner = self
         webView.uiDelegate = self
 
-        if WCSession.isSupported() {
-            WCSession.default.delegate = self
-            WCSession.default.activate()
-        }
-
         NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
@@ -69,8 +59,7 @@ final class PhoneBridge: NSObject, ObservableObject {
                                         messages: [ChatMessage(id: "diagnostic", role: "assistant", text: diagnostic)],
                                         streaming: false,
                                         stamp: Date().timeIntervalSince1970)
-            latest = snapshot
-            push(snapshot)
+            WatchLink.shared.update(snapshot)
             return
         }
 
@@ -92,44 +81,14 @@ final class PhoneBridge: NSObject, ObservableObject {
                                     streaming: (dict["streaming"] as? Bool) ?? false,
                                     stamp: Date().timeIntervalSince1970)
 
-        guard !snapshot.hasSameContent(as: latest) else { return }
-        latest = snapshot
-        push(snapshot)
-    }
-
-    // MARK: - إلى الساعة
-
-    private func push(_ snapshot: ChatSnapshot, forceSave: Bool = false) {
-        guard WCSession.isSupported() else { return }
-        let session = WCSession.default
-        guard session.activationState == .activated,
-              session.isPaired,
-              session.isWatchAppInstalled,
-              let data = snapshot.trimmed().packed() else { return }
-
-        let payload: [String: Any] = [ChatSnapshot.key: data]
-
-        if session.isReachable {
-            session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
-        }
-
-        // النسخة المحفوظة: فورًا عند اكتمال الرد، وكل ثانية أثناء الكتابة
-        let now = Date()
-        if forceSave || !snapshot.streaming || now.timeIntervalSince(lastContextPush) >= 1 {
-            lastContextPush = now
-            try? session.updateApplicationContext(payload)
-        }
-    }
-
-    fileprivate func resend() {
-        guard latest.stamp > 0 else { return }   // لا نمسح الساعة عند تشغيل التطبيق
-        push(latest, forceSave: true)
+        guard !snapshot.hasSameContent(as: WatchLink.shared.latest) else { return }
+        WatchLink.shared.update(snapshot)
     }
 
     // MARK: - الخلفية وقفل الشاشة
 
     @objc private func didEnterBackground() {
-        resend()
+        WatchLink.shared.resendOrClear()
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "AECGPT.sync") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
@@ -138,7 +97,7 @@ final class PhoneBridge: NSObject, ObservableObject {
 
     @objc private func willEnterForeground() {
         endBackgroundTask()
-        resend()
+        WatchLink.shared.resendOrClear()
     }
 
     private func endBackgroundTask() {
@@ -159,37 +118,6 @@ extension PhoneBridge: WKUIDelegate {
             webView.load(navigationAction.request)
         }
         return nil
-    }
-}
-
-// MARK: - WatchConnectivity
-
-extension PhoneBridge: WCSessionDelegate {
-    nonisolated func session(_ session: WCSession,
-                             activationDidCompleteWith activationState: WCSessionActivationState,
-                             error: Error?) {
-        Task { @MainActor in self.resend() }
-    }
-
-    nonisolated func sessionDidBecomeInactive(_ session: WCSession) {}
-
-    nonisolated func sessionDidDeactivate(_ session: WCSession) {
-        WCSession.default.activate()
-    }
-
-    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
-        guard session.isReachable else { return }
-        Task { @MainActor in self.resend() }
-    }
-
-    nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
-        Task { @MainActor in self.resend() }
-    }
-
-    /// الساعة تطلب آخر نسخة عند فتحها.
-    nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        guard message["sync"] != nil else { return }
-        Task { @MainActor in self.resend() }
     }
 }
 

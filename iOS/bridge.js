@@ -62,13 +62,53 @@
     "[class*='markdown']",
   ].join(", ");
 
+  // ---- حصر القراءة في المحادثة المفتوحة فقط
+  // ChatGPT يبقي المحادثات السابقة مخفية في الصفحة، فنختار المحادثة الحالية فقط.
+
+  const conversationId = () => {
+    const m = location.pathname.match(/\/c\/([^/?#]+)/);
+    return m ? m[1] : "";
+  };
+
+  // عنصر يحمل رقم المحادثة الحالية (من الرابط) ويحتوي رسائل
+  function conversationRoot() {
+    const id = conversationId();
+    if (!id || !document.body) return null;
+    const hits = [];
+    for (const el of document.body.getElementsByTagName("*")) {
+      for (const a of el.attributes) {
+        if (a.name !== "href" && a.value === id && el.querySelector(USER_SEL)) {
+          hits.push(el);
+          break;
+        }
+      }
+    }
+    // الأعمق، أي الأقرب للرسائل
+    return hits.find((h) => !hits.some((o) => o !== h && h.contains(o))) || null;
+  }
+
+  // هل العنصر ظاهر فعلًا على الشاشة (وليس في محادثة مخفية)؟
+  function isShown(el) {
+    if (!el.getClientRects().length) return false;
+    if (el.closest('[aria-hidden="true"], [inert], [hidden]')) return false;
+    const r = el.getBoundingClientRect();
+    const w = window.innerWidth || 10000;
+    return r.width > 0 && r.right > 0 && r.left < w;
+  }
+
   function byBubbles() {
-    const users = outermost([...document.querySelectorAll(USER_SEL)], USER_SEL);
+    const root = conversationRoot() || document;
+    const allUsers = outermost([...root.querySelectorAll(USER_SEL)], USER_SEL);
+    const shownUsers = allUsers.filter(isShown);
+    // إذا عرفنا الظاهر من المخفي، نطبّقه على الكل. وإلا نقرأ كل شيء
+    const strict = shownUsers.length > 0;
+    const users = strict ? shownUsers : allUsers;
     if (!users.length) return [];
 
     const assistants = outermostIn(
-      [...document.querySelectorAll(ASSIST_SEL)].filter(
+      [...root.querySelectorAll(ASSIST_SEL)].filter(
         (n) =>
+          (!strict || isShown(n)) &&
           !n.closest(USER_SEL) && // ليس داخل رسالة المستخدم
           !n.querySelector(USER_SEL) && // ولا يحتوي رسالة مستخدم (غلاف عام)
           !n.closest("button, nav, header, form, [data-app-shell-titlebar]")
@@ -96,8 +136,10 @@
         out.push({ role: it.role, text });
       }
     }
+    // رقم المحادثة جزء من المعرّف، حتى تعرف الساعة أنها محادثة مختلفة
+    const cid = conversationId();
     let u = 0, a = 0;
-    return out.map((m) => ({ ...m, id: m.role === "user" ? "u" + u++ : "a" + a++ }));
+    return out.map((m) => ({ ...m, id: cid + (m.role === "user" ? ":u" + u++ : ":a" + a++) }));
   }
 
   // ---- الطريقة 1: يكتشف بنفسه أي خاصية قيمتها user أو assistant
