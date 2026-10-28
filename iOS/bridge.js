@@ -12,6 +12,7 @@
     (s || "")
       .replace(/​/g, "")
       .replace(JUNK_LINE, "")
+      .replace(/^\s*(You said|ChatGPT said|قلت|قال ChatGPT)\s*:\s*/i, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
 
@@ -22,44 +23,72 @@
     return "";
   };
 
-  // ---- الطريقة 1: العناصر التي تحمل دور الكاتب مباشرة
-  function byAuthorRole() {
-    return [...document.querySelectorAll("[data-message-author-role]")].map((n, i) => ({
-      node: n,
-      role: normRole(n.getAttribute("data-message-author-role")),
-      id: n.getAttribute("data-message-id") || "m" + i,
+  const BODY_SEL =
+    ".markdown, [class*='markdown'], [class*='prose'], .whitespace-pre-wrap";
+  const outermost = (nodes, sel) =>
+    nodes.filter((n) => !(n.parentElement && n.parentElement.closest(sel)));
+
+  // ---- الطريقة 1: يكتشف بنفسه أي خاصية قيمتها user أو assistant
+  // (مثل data-message-author-role أو data-turn أو أي اسم جديد يضعه ChatGPT)
+  let roleAttr = null;
+
+  function discoverRoleAttr() {
+    if (!document.body) return null;
+    const found = new Map();
+    for (const el of document.body.getElementsByTagName("*")) {
+      for (const a of el.attributes) {
+        if (/^(class|id|style|value|name|type|autocomplete|placeholder|href|src)$/.test(a.name)) continue;
+        if (normRole(a.value)) found.set(a.name, (found.get(a.name) || 0) + 1);
+      }
+    }
+    if (!found.size) return null;
+    // نفضّل الأسماء التي توحي بالدور أو الكاتب
+    const ranked = [...found.keys()].sort((x, y) => {
+      const score = (n) => (/role|author|turn|message|sender/i.test(n) ? 1 : 0);
+      return score(y) - score(x) || found.get(y) - found.get(x);
+    });
+    return ranked[0];
+  }
+
+  function byRoleAttr() {
+    if (!roleAttr || !document.querySelector("[" + roleAttr + "]")) roleAttr = discoverRoleAttr();
+    if (!roleAttr) return [];
+    const sel = "[" + roleAttr + "]";
+    const nodes = [...document.querySelectorAll(sel)].filter((n) =>
+      normRole(n.getAttribute(roleAttr))
+    );
+    return outermost(nodes, sel).map((n, i) => ({
+      node: n.querySelector(BODY_SEL) || n,
+      role: normRole(n.getAttribute(roleAttr)),
+      id:
+        n.getAttribute("data-message-id") ||
+        n.getAttribute("data-testid") ||
+        n.getAttribute("data-test-id") ||
+        "r" + i,
     }));
   }
 
-  // ---- الطريقة 2: "أدوار" المحادثة (article / conversation-turn / data-turn)
+  // ---- الطريقة 2: "أدوار" المحادثة (article / conversation-turn)
   function byTurns() {
-    const SEL = 'article[data-turn], [data-testid^="conversation-turn"], article';
-    // نتجاهل العنصر المتداخل داخل عنصر آخر مطابق، حتى لا تتكرر الرسالة
-    const turns = [...document.querySelectorAll(SEL)].filter(
-      (t) => !(t.parentElement && t.parentElement.closest(SEL))
-    );
-    return turns.map((t, i) => {
-      let role = normRole(t.getAttribute("data-turn"));
-      if (!role) {
-        const inner = t.querySelector("[data-message-author-role]");
-        if (inner) role = normRole(inner.getAttribute("data-message-author-role"));
-      }
-      if (!role) {
-        const h = (t.querySelector("h5, h6, .sr-only") || {}).textContent || "";
-        if (/you said|قلت/i.test(h)) role = "user";
-        else if (/chatgpt said|قال/i.test(h)) role = "assistant";
-      }
-      const body =
-        t.querySelector(".markdown, [class*='markdown'], .whitespace-pre-wrap") || t;
-      return { node: body, role, id: t.getAttribute("data-testid") || "t" + i };
+    const SEL =
+      'article, [data-testid^="conversation-turn"], [data-test-id^="conversation-turn"], [data-test-id*="turn"]';
+    return outermost([...document.querySelectorAll(SEL)], SEL).map((t, i) => {
+      let role = "";
+      const h = (t.querySelector("h5, h6, .sr-only") || {}).textContent || "";
+      if (/you said|قلت/i.test(h)) role = "user";
+      else if (/chatgpt said|قال/i.test(h)) role = "assistant";
+      return { node: t.querySelector(BODY_SEL) || t, role, id: "t" + i };
     });
   }
 
   // ---- الطريقة 3: ردود ChatGPT فقط (نصوص markdown)
   function byMarkdown() {
-    return [...document.querySelectorAll(".markdown, [class*='markdown']")]
-      .filter((n) => !n.parentElement.closest(".markdown, [class*='markdown']"))
-      .map((n, i) => ({ node: n, role: "assistant", id: "md" + i }));
+    const sel = ".markdown, [class*='markdown']";
+    return outermost([...document.querySelectorAll(sel)], sel).map((n, i) => ({
+      node: n,
+      role: "assistant",
+      id: "md" + i,
+    }));
   }
 
   function toMessages(items) {
@@ -73,34 +102,50 @@
   }
 
   function collect() {
-    let messages = toMessages(byAuthorRole());
+    let messages = toMessages(byRoleAttr());
     if (!messages.length) messages = toMessages(byTurns());
     if (!messages.length) messages = toMessages(byMarkdown());
 
     const streaming = !!document.querySelector(
-      '[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="إيقاف"]'
+      '[data-testid="stop-button"], [data-test-id="stop-button"], button[aria-label*="Stop"], button[aria-label*="إيقاف"]'
     );
     const title = clean(document.title).replace(/\s*[-|–]\s*ChatGPT\s*$/i, "");
     return { title, streaming, messages, path: location.pathname };
   }
 
-  // وصف مختصر لما في الصفحة، يظهر على الساعة إذا لم نجد الرسائل
+  // وصف دقيق لما في الصفحة، يظهر على الساعة إذا لم نجد الرسائل
   function diagnose() {
-    const count = (sel) => document.querySelectorAll(sel).length;
+    const short = (s, n) => (s.length > n ? s.slice(0, n) + "…" : s);
     const attrs = new Set();
-    document.querySelectorAll("main *").forEach((el) => {
-      for (const a of el.attributes) if (a.name.startsWith("data-")) attrs.add(a.name);
-    });
+    const testIds = new Set();
+    for (const el of document.body.getElementsByTagName("*")) {
+      for (const a of el.attributes) {
+        if (a.name.startsWith("data-") && !a.name.startsWith("data-app-shell")) attrs.add(a.name);
+      }
+      const t = el.getAttribute("data-test-id") || el.getAttribute("data-testid");
+      if (t) testIds.add(short(t.replace(/\d+/g, "#"), 28));
+    }
+    // سلسلة الآباء لأول نص مستخدم ظاهر
+    let chain = "-";
+    const pw = document.querySelector(".whitespace-pre-wrap");
+    if (pw) {
+      const parts = [];
+      let el = pw;
+      for (let k = 0; el && k < 7; k++, el = el.parentElement) {
+        const d = [...el.attributes]
+          .filter((a) => a.name.startsWith("data-"))
+          .map((a) => a.name.replace("data-", "") + (a.value && a.value.length < 20 ? "=" + a.value : ""))
+          .join(",");
+        parts.push(el.tagName.toLowerCase() + (d ? "[" + d + "]" : ""));
+      }
+      chain = parts.join(" < ");
+    }
     return [
-      "⚠️ لم أجد الرسائل. صوّر هذه الشاشة وأرسلها:",
-      "article: " + count("article"),
-      "data-turn: " + count("[data-turn]"),
-      "conv-turn: " + count('[data-testid^="conversation-turn"]'),
-      "markdown: " + count("[class*='markdown']"),
-      "pre-wrap: " + count(".whitespace-pre-wrap"),
-      "main: " + count("main"),
-      "attrs: " + [...attrs].slice(0, 20).join(" "),
-    ].join("\n");
+      "⚠️ تشخيص 2 — صوّر كل الشاشة (مرر للأسفل):",
+      "PARENTS: " + chain,
+      "TESTIDS: " + [...testIds].slice(0, 25).join(" | "),
+      "ATTRS: " + [...attrs].slice(0, 40).join(" "),
+    ].join("\n\n");
   }
 
   let lastSignature = "";
