@@ -8,8 +8,6 @@ import WatchConnectivity
 /// 2) نسخة محفوظة تصل للساعة حتى لو كانت نائمة (applicationContext)
 @MainActor
 final class PhoneBridge: NSObject, ObservableObject {
-    static let shared = PhoneBridge()
-
     let webView: WKWebView
 
     private let home = "https://chatgpt.com"
@@ -18,7 +16,7 @@ final class PhoneBridge: NSObject, ObservableObject {
     private var lastContextPush = Date.distantPast
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
-    private override init() {
+    override init() {
         let handler = ScriptHandler()
         let controller = WKUserContentController()
         if let url = Bundle.main.url(forResource: "bridge", withExtension: "js"),

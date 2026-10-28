@@ -3,13 +3,12 @@ import WebKit
 
 @main
 struct AECGPTApp: App {
-    init() {
-        _ = PhoneBridge.shared   // يبدأ الاتصال بالساعة فور تشغيل التطبيق
-    }
+    // يُنشأ بعد أن يجهز iOS التطبيق، وليس في أول لحظة من التشغيل
+    @StateObject private var bridge = PhoneBridge()
 
     var body: some Scene {
         WindowGroup {
-            WebView(webView: PhoneBridge.shared.webView)
+            WebView(webView: bridge.webView)
         }
     }
 }
