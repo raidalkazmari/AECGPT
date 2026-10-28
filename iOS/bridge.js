@@ -28,6 +28,78 @@
   const outermost = (nodes, sel) =>
     nodes.filter((n) => !(n.parentElement && n.parentElement.closest(sel)));
 
+  // يُبقي العناصر التي ليس لها أب من نفس المجموعة
+  const outermostIn = (nodes) => {
+    const set = new Set(nodes);
+    return nodes.filter((n) => {
+      for (let p = n.parentElement; p; p = p.parentElement) if (set.has(p)) return false;
+      return true;
+    });
+  };
+
+  // النص بدون أسطر الأزرار (نسخ، تعديل...)
+  const textWithoutButtons = (n) => {
+    const labels = new Set(
+      [...n.querySelectorAll("button, [role='button']")]
+        .map((b) => (b.innerText || "").trim())
+        .filter(Boolean)
+    );
+    return (n.innerText || "")
+      .split("\n")
+      .filter((line) => !labels.has(line.trim()))
+      .join("\n");
+  };
+
+  // ---- الطريقة 0: تصميم ChatGPT الجديد (app-shell، 2026)
+  // رسائلك داخل data-user-message-bubble، والردود تحمل علامات النسخ والتحديد.
+  const USER_SEL = "[data-user-message-bubble]";
+  const ASSIST_SEL = [
+    '[data-testid="chatgpt-writing-block"]',
+    "[data-markdown-copy]",
+    "[data-chatgpt-conversation-selection-target]",
+    "[data-thread-find-target]",
+    ".markdown",
+    "[class*='markdown']",
+  ].join(", ");
+
+  function byBubbles() {
+    const users = outermost([...document.querySelectorAll(USER_SEL)], USER_SEL);
+    if (!users.length) return [];
+
+    const assistants = outermostIn(
+      [...document.querySelectorAll(ASSIST_SEL)].filter(
+        (n) =>
+          !n.closest(USER_SEL) && // ليس داخل رسالة المستخدم
+          !n.querySelector(USER_SEL) && // ولا يحتوي رسالة مستخدم (غلاف عام)
+          !n.closest("button, nav, header, form, [data-app-shell-titlebar]")
+      )
+    );
+
+    // نرتّب الكل حسب مكانه في الصفحة
+    const items = [
+      ...users.map((n) => ({ n, role: "user" })),
+      ...assistants.map((n) => ({ n, role: "assistant" })),
+    ].sort((a, b) =>
+      a.n.compareDocumentPosition(b.n) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+    );
+
+    // أجزاء الرد المتتالية تُدمج في رسالة واحدة
+    const out = [];
+    for (const it of items) {
+      const pw = it.role === "user" && it.n.querySelector(".whitespace-pre-wrap");
+      const text = clean(textWithoutButtons(pw || it.n));
+      if (!text) continue;
+      const last = out[out.length - 1];
+      if (last && last.role === it.role && it.role === "assistant") {
+        last.text += "\n\n" + text;
+      } else {
+        out.push({ role: it.role, text });
+      }
+    }
+    let u = 0, a = 0;
+    return out.map((m) => ({ ...m, id: m.role === "user" ? "u" + u++ : "a" + a++ }));
+  }
+
   // ---- الطريقة 1: يكتشف بنفسه أي خاصية قيمتها user أو assistant
   // (مثل data-message-author-role أو data-turn أو أي اسم جديد يضعه ChatGPT)
   let roleAttr = null;
@@ -102,7 +174,8 @@
   }
 
   function collect() {
-    let messages = toMessages(byRoleAttr());
+    let messages = byBubbles();
+    if (!messages.length) messages = toMessages(byRoleAttr());
     if (!messages.length) messages = toMessages(byTurns());
     if (!messages.length) messages = toMessages(byMarkdown());
 
@@ -141,7 +214,12 @@
       chain = parts.join(" < ");
     }
     return [
-      "⚠️ تشخيص 2 — صوّر كل الشاشة (مرر للأسفل):",
+      "⚠️ تشخيص 3 — صوّر كل الشاشة (مرر للأسفل):",
+      "bubble:" + document.querySelectorAll(USER_SEL).length +
+        " write:" + document.querySelectorAll('[data-testid="chatgpt-writing-block"]').length +
+        " mdcopy:" + document.querySelectorAll("[data-markdown-copy]").length +
+        " sel:" + document.querySelectorAll("[data-chatgpt-conversation-selection-target]").length +
+        " find:" + document.querySelectorAll("[data-thread-find-target]").length,
       "PARENTS: " + chain,
       "TESTIDS: " + [...testIds].slice(0, 25).join(" | "),
       "ATTRS: " + [...attrs].slice(0, 40).join(" "),
