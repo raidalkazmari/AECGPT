@@ -35,6 +35,10 @@ final class PhoneBridge: NSObject, ObservableObject {
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
+        // يمنع "الدقرة": لا نضيف هوامش من عندنا فوق هوامش الصفحة، ولا ارتداد للصفحة كلها
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceVertical = false
 
         super.init()
         handler.owner = self

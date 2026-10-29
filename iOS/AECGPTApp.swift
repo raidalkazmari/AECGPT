@@ -14,6 +14,8 @@ struct AECGPTApp: App {
     var body: some Scene {
         WindowGroup {
             WebView(webView: bridge.webView)
+                // الصفحة تتعامل مع الكيبورد بنفسها، فلا نصغّرها مرة ثانية
+                .ignoresSafeArea(.keyboard)
         }
     }
 }

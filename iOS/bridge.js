@@ -383,6 +383,35 @@
     if (!timer) timer = setTimeout(flush, delay);
   }
 
+  // ---- تثبيت الصفحة
+  // إذا كانت الصفحة أطول من الشاشة بشيء بسيط فقط (هوامش)، فهي واجهة ثابتة
+  // والتمرير الحقيقي داخل المحادثة. نثبّتها في مكانها حتى لا تهتز فوق وتحت.
+  const LOCK = "aecgpt-lock";
+  try {
+    const st = document.createElement("style");
+    st.textContent =
+      "html." + LOCK + ",html." + LOCK + " body{overflow:hidden!important;overscroll-behavior:none!important}";
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+
+  function stabilize() {
+    try {
+      const se = document.scrollingElement || document.documentElement;
+      const extra = se.scrollHeight - window.innerHeight;
+      const html = document.documentElement;
+      if (extra > 0 && extra < 160) {
+        if (!html.classList.contains(LOCK)) html.classList.add(LOCK);
+        if (se.scrollTop !== 0) se.scrollTop = 0;
+      } else if (extra >= 160 && html.classList.contains(LOCK)) {
+        html.classList.remove(LOCK); // صفحة طويلة فعلًا (مثل تسجيل الدخول): نسمح بالتمرير
+      }
+    } catch (e) {}
+  }
+  window.addEventListener("resize", stabilize);
+  window.addEventListener("scroll", stabilize, { passive: true });
+  setInterval(stabilize, 1000);
+  stabilize();
+
   new MutationObserver(schedule).observe(document.documentElement, {
     childList: true,
     subtree: true,
