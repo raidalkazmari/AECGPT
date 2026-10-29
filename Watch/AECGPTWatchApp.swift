@@ -18,6 +18,12 @@ struct ChatView: View {
 
     private var messages: [ChatMessage] { store.snapshot.messages }
 
+    private var status: String {
+        if !store.isConnected { return "🔴 غير متصل" }
+        if store.snapshot.streaming { return "🟢 يكتب…" }
+        return "🟢 متصل"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -27,7 +33,8 @@ struct ChatView: View {
                     conversation
                 }
             }
-            .navigationTitle(store.snapshot.title.isEmpty ? "AECGPT" : store.snapshot.title)
+            // حالة الاتصال بخط صغير مكان العنوان، فلا تأخذ مساحة من المحادثة
+            .navigationTitle(status)
             .navigationBarTitleDisplayMode(.inline)
         }
         .onChange(of: scenePhase) { phase in

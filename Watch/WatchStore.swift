@@ -6,6 +6,8 @@ import WatchConnectivity
 @MainActor
 final class WatchStore: NSObject, ObservableObject {
     @Published private(set) var snapshot: ChatSnapshot
+    /// هل الجوال في المدى ويمكن الوصول له الآن؟
+    @Published private(set) var isConnected = false
 
     private let storageKey = "lastSnapshot"
 
@@ -34,6 +36,7 @@ final class WatchStore: NSObject, ObservableObject {
     /// يطلب من الجوال آخر نسخة (عند فتح التطبيق).
     func requestSync() {
         let session = WCSession.default
+        isConnected = session.activationState == .activated && session.isReachable
         guard session.activationState == .activated, session.isReachable else { return }
         session.sendMessage(["sync": true], replyHandler: nil, errorHandler: nil)
     }
@@ -44,15 +47,20 @@ extension WatchStore: WCSessionDelegate {
                              activationDidCompleteWith activationState: WCSessionActivationState,
                              error: Error?) {
         let saved = session.receivedApplicationContext[ChatSnapshot.key] as? Data
+        let reachable = session.isReachable
         Task { @MainActor in
+            self.isConnected = reachable
             if let saved { self.apply(saved) }
             self.requestSync()
         }
     }
 
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
-        guard session.isReachable else { return }
-        Task { @MainActor in self.requestSync() }
+        let reachable = session.isReachable
+        Task { @MainActor in
+            self.isConnected = reachable
+            if reachable { self.requestSync() }
+        }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {

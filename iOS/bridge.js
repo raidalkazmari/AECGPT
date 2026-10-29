@@ -37,16 +37,29 @@
     });
   };
 
-  // النص بدون أسطر الأزرار (نسخ، تعديل...)
+  // النص بدون كلمات الأزرار (نسخ، تعديل...) حتى لو كانت في نفس السطر
   const textWithoutButtons = (n) => {
-    const labels = new Set(
-      [...n.querySelectorAll("button, [role='button']")]
-        .map((b) => (b.innerText || "").trim())
-        .filter(Boolean)
-    );
+    const labels = [
+      ...new Set(
+        [...n.querySelectorAll("button, [role='button']")]
+          .map((b) => (b.innerText || "").trim())
+          .filter(Boolean)
+      ),
+    ].sort((x, y) => y.length - x.length);
     return (n.innerText || "")
       .split("\n")
-      .filter((line) => !labels.has(line.trim()))
+      .map((line) => {
+        let t = line.trim();
+        for (let changed = true; changed && t; ) {
+          changed = false;
+          for (const l of labels) {
+            if (t === l) { t = ""; changed = true; break; }
+            if (t.endsWith(l)) { t = t.slice(0, -l.length).trim(); changed = true; }
+            if (t.startsWith(l)) { t = t.slice(l.length).trim(); changed = true; }
+          }
+        }
+        return t;
+      })
       .join("\n");
   };
 
@@ -58,6 +71,7 @@
     "[data-markdown-copy]",
     "[data-chatgpt-conversation-selection-target]",
     "[data-thread-find-target]",
+    "pre", // رد فيه مربع كود/Plain text فقط
     ".markdown",
     "[class*='markdown']",
   ].join(", ");
@@ -96,6 +110,23 @@
     return r.width > 0 && r.right > 0 && r.left < w;
   }
 
+  // أصغر غلاف يجمع أجزاء الرد، ثم نوسّعه لآخر حد قبل أن يشمل رسالة مستخدم
+  function replyContainer(nodes, root) {
+    const stop = root === document ? document.body : root;
+    let c = nodes[0];
+    while (c !== stop && !nodes.every((n) => c.contains(n))) c = c.parentElement;
+    while (
+      c !== stop &&
+      c.parentElement &&
+      c.parentElement !== stop &&
+      !c.parentElement.querySelector(USER_SEL) &&
+      !c.parentElement.matches("main, nav, header, form, body")
+    ) {
+      c = c.parentElement;
+    }
+    return c;
+  }
+
   function byBubbles() {
     const root = conversationRoot() || document;
     const allUsers = outermost([...root.querySelectorAll(USER_SEL)], USER_SEL);
@@ -123,18 +154,25 @@
       a.n.compareDocumentPosition(b.n) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
     );
 
-    // أجزاء الرد المتتالية تُدمج في رسالة واحدة
-    const out = [];
+    // أجزاء الرد المتتالية = رد واحد. نقرأ الغلاف الكامل لهذا الرد،
+    // حتى يدخل كل شيء فيه: الفقرات ومربعات Plain text والكود والجداول.
+    const groups = [];
     for (const it of items) {
-      const pw = it.role === "user" && it.n.querySelector(".whitespace-pre-wrap");
-      const text = clean(textWithoutButtons(pw || it.n));
-      if (!text) continue;
-      const last = out[out.length - 1];
-      if (last && last.role === it.role && it.role === "assistant") {
-        last.text += "\n\n" + text;
+      const last = groups[groups.length - 1];
+      if (it.role === "assistant" && last && last.role === "assistant") last.nodes.push(it.n);
+      else groups.push({ role: it.role, nodes: [it.n] });
+    }
+
+    const out = [];
+    for (const g of groups) {
+      let node;
+      if (g.role === "user") {
+        node = g.nodes[0].querySelector(".whitespace-pre-wrap") || g.nodes[0];
       } else {
-        out.push({ role: it.role, text });
+        node = replyContainer(g.nodes, root);
       }
+      const text = clean(textWithoutButtons(node));
+      if (text) out.push({ role: g.role, text });
     }
     // رقم المحادثة جزء من المعرّف، حتى تعرف الساعة أنها محادثة مختلفة
     const cid = conversationId();
