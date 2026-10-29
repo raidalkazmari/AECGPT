@@ -85,9 +85,20 @@
   };
 
   // عنصر يحمل رقم المحادثة الحالية (من الرابط) ويحتوي رسائل
+  // نتيجة البحث تُحفظ، فلا نمسح الصفحة كلها في كل مرة (مهم أثناء كتابة الرد)
+  let rootCache = { id: "", root: null, at: 0 };
+
   function conversationRoot() {
     const id = conversationId();
     if (!id || !document.body) return null;
+    const c = rootCache;
+    if (c.id === id && (c.root ? c.root.isConnected : Date.now() - c.at < 3000)) return c.root;
+    const root = findConversationRoot(id);
+    rootCache = { id, root, at: Date.now() };
+    return root;
+  }
+
+  function findConversationRoot(id) {
     const hits = [];
     for (const el of document.body.getElementsByTagName("*")) {
       for (const a of el.attributes) {
@@ -97,8 +108,11 @@
         }
       }
     }
-    // الأعمق، أي الأقرب للرسائل
-    return hits.find((h) => !hits.some((o) => o !== h && h.contains(o))) || null;
+    if (!hits.length) return null;
+    // أصغر غلاف يجمع كل أجزاء هذه المحادثة (قد تكون مقسّمة على عدة عناصر بنفس الرقم)
+    let root = hits[0];
+    while (root && !hits.every((h) => root.contains(h))) root = root.parentElement;
+    return root;
   }
 
   // هل العنصر ظاهر فعلًا على الشاشة (وليس في محادثة مخفية)؟
@@ -133,12 +147,17 @@
     const shownUsers = allUsers.filter(isShown);
     // إذا عرفنا الظاهر من المخفي، نطبّقه على الكل. وإلا نقرأ كل شيء
     const strict = shownUsers.length > 0;
-    const users = strict ? shownUsers : allUsers;
+    // الساعة تعرض آخر المحادثة فقط، فنقرأ آخر 40 سؤال وردودها (أخف على الجوال)
+    const users = (strict ? shownUsers : allUsers).slice(-40);
     if (!users.length) return [];
+    const first = users[0];
+    const isAfterFirst = (n) =>
+      first === n || !!(first.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
 
     const assistants = outermostIn(
       [...root.querySelectorAll(ASSIST_SEL)].filter(
         (n) =>
+          isAfterFirst(n) &&
           (!strict || isShown(n)) &&
           !n.closest(USER_SEL) && // ليس داخل رسالة المستخدم
           !n.querySelector(USER_SEL) && // ولا يحتوي رسالة مستخدم (غلاف عام)
@@ -318,8 +337,22 @@
     } catch (e) {}
   }
 
+  // إذا كانت الصفحة ثقيلة (محادثة طويلة) نقرأ بوتيرة أبطأ حتى لا يعلق الجوال
+  let delay = 150;
+
   function flush() {
     timer = null;
+    const started = performance.now();
+    try {
+      flushNow();
+    } catch (e) {
+      // خطأ غير متوقع في الصفحة: نتجاهله ونكمل في الدورة القادمة بدل أن يتوقف السكربت
+    }
+    const cost = performance.now() - started;
+    delay = Math.min(1000, Math.max(150, cost * 6));
+  }
+
+  function flushNow() {
     if (location.pathname !== currentPath) {
       currentPath = location.pathname;
       pathSince = Date.now();
@@ -347,7 +380,7 @@
   }
 
   function schedule() {
-    if (!timer) timer = setTimeout(flush, 150);
+    if (!timer) timer = setTimeout(flush, delay);
   }
 
   new MutationObserver(schedule).observe(document.documentElement, {

@@ -10,6 +10,9 @@ final class PhoneBridge: NSObject, ObservableObject {
     private let home = "https://chatgpt.com"
     private let lastPathKey = "lastConversationPath"
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// الصفحة تعطلت أو فشل تحميلها، وتحتاج إعادة تحميل
+    private var needsReload = false
+    private var retryScheduled = false
 
     override init() {
         let handler = ScriptHandler()
@@ -36,16 +39,40 @@ final class PhoneBridge: NSObject, ObservableObject {
         super.init()
         handler.owner = self
         webView.uiDelegate = self
+        webView.navigationDelegate = self
 
         NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
 
-        // يفتح آخر محادثة كانت مفتوحة
+        loadStart()
+    }
+
+    /// يفتح آخر محادثة كانت مفتوحة
+    private func loadStart() {
         let path = UserDefaults.standard.string(forKey: lastPathKey) ?? "/"
         let url = URL(string: home + (path.hasPrefix("/") ? path : "/")) ?? URL(string: home)!
         webView.load(URLRequest(url: url))
+    }
+
+    /// يعيد التحميل: الصفحة الحالية إن وُجدت، وإلا آخر محادثة
+    private func recover() {
+        needsReload = false
+        if webView.url != nil { webView.reload() } else { loadStart() }
+    }
+
+    /// فشل التحميل (غالبًا انقطاع النت): يحاول مرة ثانية كل 5 ثوانٍ ما دام التطبيق مفتوحًا
+    private func scheduleRetry() {
+        needsReload = true
+        guard !retryScheduled else { return }
+        retryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.retryScheduled = false
+            guard self.needsReload else { return }
+            if UIApplication.shared.applicationState == .active { self.recover() } else { self.scheduleRetry() }
+        }
     }
 
     // MARK: - من الصفحة
@@ -97,6 +124,8 @@ final class PhoneBridge: NSObject, ObservableObject {
 
     @objc private func willEnterForeground() {
         endBackgroundTask()
+        // إذا تعطلت الصفحة وأنت خارج التطبيق، تُصلَح قبل أن تراها
+        if needsReload || webView.url == nil { recover() }
         WatchLink.shared.resendOrClear()
     }
 
@@ -118,6 +147,39 @@ extension PhoneBridge: WKUIDelegate {
             webView.load(navigationAction.request)
         }
         return nil
+    }
+}
+
+// MARK: - إصلاح ذاتي للصفحة
+
+extension PhoneBridge: WKNavigationDelegate {
+    /// iOS أوقف محرك الصفحة (ضغط ذاكرة): بدل الصفحة البيضاء نعيد التحميل فورًا
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if UIApplication.shared.applicationState == .active {
+            recover()
+        } else {
+            needsReload = true
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleLoadError(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleLoadError(error)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        needsReload = false
+    }
+
+    private func handleLoadError(_ error: Error) {
+        let e = error as NSError
+        // إلغاء التحميل بسبب الانتقال لصفحة أخرى ليس خطأ
+        if e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled { return }
+        if e.domain == "WebKitErrorDomain" && e.code == 102 { return } // تحميل قاطعه تنزيل/رابط خارجي
+        scheduleRetry()
     }
 }
 
