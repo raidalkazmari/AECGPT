@@ -14,6 +14,17 @@ final class PhoneBridge: NSObject, ObservableObject {
     private var needsReload = false
     private var retryScheduled = false
 
+    // ---- آخر محادثة في الحساب
+    private let manualKey = "manualChoiceAt"
+    /// آخر مرة اخترت فيها محادثة بنفسك من الجوال (ms). الأحدث منها في حسابك يفتح تلقائيًا.
+    private var manualAt: Double {
+        get { UserDefaults.standard.double(forKey: manualKey) }
+        set { UserDefaults.standard.set(newValue, forKey: manualKey) }
+    }
+    private var lastSeenPath: String?
+    private var expectedAutoPath: String?
+    private var lastLatestCheck = Date.distantPast
+
     override init() {
         let handler = ScriptHandler()
         let controller = WKUserContentController()
@@ -49,6 +60,8 @@ final class PhoneBridge: NSObject, ObservableObject {
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(watchOpened),
+                                               name: .aecgptWatchOpened, object: nil)
 
         loadStart()
     }
@@ -115,8 +128,9 @@ final class PhoneBridge: NSObject, ObservableObject {
                                images: (images?.isEmpty ?? true) ? nil : images)
         }
 
-        if let path = dict["path"] as? String, path.contains("/c/") {
-            UserDefaults.standard.set(path, forKey: lastPathKey)
+        if let path = dict["path"] as? String {
+            trackNavigation(path)
+            if path.contains("/c/") { UserDefaults.standard.set(path, forKey: lastPathKey) }
         }
 
         let snapshot = ChatSnapshot(title: (dict["title"] as? String) ?? "",
@@ -126,6 +140,42 @@ final class PhoneBridge: NSObject, ObservableObject {
 
         guard !snapshot.hasSameContent(as: WatchLink.shared.latest) else { return }
         WatchLink.shared.update(snapshot)
+    }
+
+    // MARK: - آخر محادثة في حساب ChatGPT
+
+    /// تغيّر المسار: إما انتقال تلقائي منا، أو اختيارك أنت
+    private func trackNavigation(_ path: String) {
+        defer { lastSeenPath = path }
+        guard let previous = lastSeenPath, previous != path else { return }
+        if let expected = expectedAutoPath, path.contains(expected) {
+            expectedAutoPath = nil
+            return
+        }
+        manualAt = Date().timeIntervalSince1970 * 1000
+    }
+
+    /// يفتح آخر محادثة تحدّثت في حسابك (من أي جهاز)، إلا إذا كان اختيارك اليدوي أحدث
+    func openLatestIfNewer() {
+        guard Date().timeIntervalSince(lastLatestCheck) > 8 else { return }
+        lastLatestCheck = Date()
+        webView.callAsyncJavaScript(
+            "return window.__aecgptLatest ? await window.__aecgptLatest(m) : null;",
+            arguments: ["m": manualAt],
+            in: nil,
+            in: .page
+        ) { [weak self] result in
+            guard let self,
+                  case .success(let value) = result,
+                  let id = value as? String, !id.isEmpty,
+                  let url = URL(string: self.home + "/c/" + id) else { return }
+            self.expectedAutoPath = "/c/" + id
+            self.webView.load(URLRequest(url: url))
+        }
+    }
+
+    @objc private func watchOpened() {
+        openLatestIfNewer()
     }
 
     // MARK: - صور من مواقع خارجية (مثل صور نتائج البحث)
@@ -168,7 +218,7 @@ final class PhoneBridge: NSObject, ObservableObject {
     @objc private func willEnterForeground() {
         endBackgroundTask()
         // إذا تعطلت الصفحة وأنت خارج التطبيق، تُصلَح قبل أن تراها
-        if needsReload || webView.url == nil { recover() }
+        if needsReload || webView.url == nil { recover() } else { openLatestIfNewer() }
         WatchLink.shared.resend()
     }
 
@@ -215,6 +265,10 @@ extension PhoneBridge: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         needsReload = false
+        // بعد ما تجهز الصفحة: هل فيه محادثة أحدث في حسابك؟
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.openLatestIfNewer()
+        }
     }
 
     private func handleLoadError(_ error: Error) {

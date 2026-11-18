@@ -163,8 +163,16 @@ extension WatchLink: WCSessionDelegate {
         let sync = message["sync"] != nil
         let need = message["need"] as? [String] ?? []
         Task { @MainActor in
-            if sync { self.resend() }
+            if sync {
+                self.resend()
+                // الساعة انفتحت: نتأكد أنها على آخر محادثة في حسابك
+                NotificationCenter.default.post(name: .aecgptWatchOpened, object: nil)
+            }
             if !need.isEmpty { self.resendImages(need) }
         }
     }
+}
+
+extension Notification.Name {
+    static let aecgptWatchOpened = Notification.Name("aecgptWatchOpened")
 }
