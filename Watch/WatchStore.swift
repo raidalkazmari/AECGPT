@@ -17,6 +17,10 @@ final class WatchStore: NSObject, ObservableObject {
     @Published private(set) var listLoading = false
     /// طلبنا محادثة وننتظرها
     @Published private(set) var opening: String?
+    /// صور ما قدر الجوال يجيبها: المفتاح ← السبب
+    @Published private(set) var failedImages: [String: String] = [:]
+    /// سؤال اخترته من الفهرس: الشاشة تنتقل له
+    @Published var jumpTarget: String?
 
     private let storageKey = "lastSnapshot"
     private let listKey = "lastConversationList"
@@ -73,6 +77,7 @@ final class WatchStore: NSObject, ObservableObject {
     fileprivate func apply(_ data: Data) {
         guard let incoming = ChatSnapshot.unpack(data),
               incoming.stamp >= snapshot.stamp else { return }   // نتجاهل أي نسخة أقدم
+        if incoming.conversationId != snapshot.conversationId { failedImages.removeAll() }
         snapshot = incoming
         if opening == nil || opening == incoming.conversationId { opening = nil }
         UserDefaults.standard.set(data, forKey: storageKey)
@@ -89,10 +94,11 @@ final class WatchStore: NSObject, ObservableObject {
     fileprivate func setTyping(_ value: Bool) { typing = value }
     fileprivate func setConnected(_ value: Bool) { isConnected = value }
     fileprivate func imageArrived() { imagesVersion += 1 }
+    fileprivate func imageFailed(_ key: String, reason: String) { failedImages[key] = reason }
 
     /// يطلب من الجوال الصور التي في المحادثة وليست عندنا (مرة كل 5 ثوانٍ كحد أقصى)
     func requestMissingImages() {
-        let missing = snapshot.allImageKeys.filter { !WatchImages.has($0) }
+        let missing = snapshot.allImageKeys.filter { !WatchImages.has($0) && failedImages[$0] == nil }
         guard !missing.isEmpty, Date().timeIntervalSince(lastNeedRequest) > 5 else { return }
         let session = WCSession.default
         guard session.activationState == .activated, session.isReachable else { return }
@@ -128,6 +134,11 @@ extension WatchStore: WCSessionDelegate {
             Task { @MainActor in self.imageArrived() }
             return
         }
+        if let key = message["imgFailed"] as? String {
+            let reason = message["reason"] as? String ?? ""
+            Task { @MainActor in self.imageFailed(key, reason: reason) }
+            return
+        }
         if let typing = message["typing"] as? Bool {
             Task { @MainActor in self.setTyping(typing) }
             return
@@ -146,6 +157,11 @@ extension WatchStore: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        if let key = userInfo["imgFailed"] as? String {
+            let reason = userInfo["reason"] as? String ?? ""
+            Task { @MainActor in self.imageFailed(key, reason: reason) }
+            return
+        }
         guard let list = userInfo["list"] as? Data else { return }
         Task { @MainActor in self.applyList(list) }
     }

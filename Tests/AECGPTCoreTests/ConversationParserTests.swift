@@ -107,6 +107,33 @@ final class ConversationParserTests: XCTestCase {
         XCTAssertEqual(c.messages.map(\.text), ["hi", "hello"])
     }
 
+    func testWebImagesFromSearchAndMarkdown() throws {
+        let json = """
+        {"title": "صور", "conversation_id": "c2", "current_node": "a", "mapping": {
+          "u": {"id": "u", "parent": null, "children": ["a"], "message": {"id": "u", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["وريني برج المملكة"]}}},
+          "a": {"id": "a", "parent": "u", "children": [], "message": {"id": "a", "author": {"role": "assistant"}, "recipient": "all",
+            "content": {"content_type": "text", "parts": ["\\ue200i\\ue202turn0image0\\ue201هذا البرج.\\n\\n![برج](https://img.example.com/tower.jpg)\\n\\nانتهى"]},
+            "metadata": {"content_references": [
+              {"type": "image_v2", "images": [
+                {"url": "https://site.com/page", "thumbnail_url": "https://img.example.com/t1.jpg"},
+                {"content_url": "https://img.example.com/t2.jpg"}]},
+              {"type": "grouped_webpages", "items": [{"url": "https://site.com"}]},
+              {"type": "image_inline", "image_url": "https://img.example.com/tower.jpg"}
+            ]}}}
+        }}
+        """
+        let c = try ConversationParser.parseConversation(Data(json.utf8))
+        let reply = c.messages[1]
+        XCTAssertEqual(reply.text, "هذا البرج.\n\nانتهى", reply.text)
+        let urls = reply.imageKeys.compactMap { c.webImages[$0] }
+        XCTAssertEqual(urls, ["https://img.example.com/tower.jpg",
+                              "https://img.example.com/t1.jpg",
+                              "https://img.example.com/t2.jpg"])
+        XCTAssertTrue(reply.imageKeys.allSatisfy { $0.hasPrefix("web-") && !$0.contains("/") })
+        XCTAssertEqual(ConversationParser.webKey("https://a.com/x"), ConversationParser.webKey("https://a.com/x"))
+        XCTAssertNotEqual(ConversationParser.webKey("https://a.com/x"), ConversationParser.webKey("https://a.com/y"))
+    }
+
     func testFileKeys() {
         XCTAssertEqual(ConversationParser.fileKey("file-service://file-abc"), "file-abc")
         XCTAssertEqual(ConversationParser.fileKey("sediment://file_00000000abc"), "file_00000000abc")

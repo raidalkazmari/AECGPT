@@ -145,6 +145,17 @@ final class WatchLink: NSObject {
         }
     }
 
+    /// صورة ما قدرنا نجيبها: الساعة تعرض السبب بدل علامة التحميل
+    func sendImageFailed(_ key: String, reason: String) {
+        guard let session = readySession() else { return }
+        let info: [String: Any] = ["imgFailed": key, "reason": reason]
+        if session.isReachable {
+            session.sendMessage(info, replyHandler: nil, errorHandler: nil)
+        } else {
+            session.transferUserInfo(info)
+        }
+    }
+
     /// الساعة طلبت صورًا ناقصة عندها
     fileprivate func resendImages(_ keys: [String]) {
         var missing: [String] = []

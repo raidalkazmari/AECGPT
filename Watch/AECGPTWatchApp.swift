@@ -18,10 +18,17 @@ struct ChatView: View {
     @EnvironmentObject private var store: WatchStore
     @Environment(\.scenePhase) private var scenePhase
 
+    /// حجم الخط (يتغير من زر Aa ويبقى محفوظ)
+    @AppStorage("chatTextSize") private var textSize: Double = 14
+    private let sizes: [Double] = [12, 14, 16, 18]
+    /// ردود قديمة فتحتها كاملة
+    @State private var expanded: Set<String> = []
+
     /// تحديث تلقائي كل 20 ثانية والتطبيق ظاهر (لو تحدّثت من جهاز ثاني)
     private let refresh = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
 
     private var messages: [ChatMessage] { store.snapshot.messages }
+    private var lastReplyId: String? { messages.last(where: { !$0.isUser })?.id }
 
     private var status: String {
         if !store.isConnected { return "🔴 غير متصل" }
@@ -42,6 +49,7 @@ struct ChatView: View {
             .navigationTitle(status)
             .navigationBarTitleDisplayMode(.inline)
         }
+        .environment(\.chatTextSize, CGFloat(textSize))
         .onChange(of: scenePhase) { phase in
             if phase == .active { store.requestLatest() }
         }
@@ -54,11 +62,15 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    controls
+                    controls(proxy)
                         .id("top")
 
                     ForEach(messages) { message in
-                        MessageRow(message: message, imagesVersion: store.imagesVersion)
+                        MessageRow(message: message,
+                                   collapsed: isCollapsed(message),
+                                   imagesVersion: store.imagesVersion,
+                                   failed: store.failedImages,
+                                   onExpand: { expanded.insert(message.id) })
                             .id(message.id)
                     }
 
@@ -69,52 +81,94 @@ struct ChatView: View {
                         }
                         .frame(maxWidth: .infinity)
                     }
+
+                    // آخر المحادثة: رجوع سريع للأعلى
+                    Button {
+                        withAnimation { proxy.scrollTo("top", anchor: .top) }
+                    } label: {
+                        Label("للأعلى", systemImage: "arrow.up.to.line")
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.top, 4)
                 }
                 .padding(.horizontal, 2)
             }
             // محادثة ثانية: نروح لآخر سؤال فيها
             .onChange(of: store.snapshot.conversationId) { _ in
-                jumpToLastQuestion(proxy, animated: false)
+                expanded.removeAll()
+                jumpToLastQuestion(proxy)
             }
             // رسالة جديدة في نفس المحادثة: نروح لبدايتها. غير كذا تتصفح براحتك
             .onChange(of: messages.last?.id) { id in
                 guard let id else { return }
                 withAnimation { proxy.scrollTo(id, anchor: .top) }
             }
-            .onAppear { jumpToLastQuestion(proxy, animated: false) }
+            // سؤال من الفهرس
+            .onChange(of: store.jumpTarget) { target in
+                guard let target else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    proxy.scrollTo(target, anchor: .top)
+                    store.jumpTarget = nil
+                }
+            }
+            .onAppear { jumpToLastQuestion(proxy) }
         }
     }
 
-    private func jumpToLastQuestion(_ proxy: ScrollViewProxy, animated: Bool) {
+    /// الردود القديمة الطويلة تظهر مختصرة، وآخر رد كامل
+    private func isCollapsed(_ message: ChatMessage) -> Bool {
+        !message.isUser && message.id != lastReplyId && !expanded.contains(message.id)
+            && (message.text.count > 350 || message.imageKeys.count > 1)
+    }
+
+    private func jumpToLastQuestion(_ proxy: ScrollViewProxy) {
         guard let target = messages.last(where: \.isUser)?.id ?? messages.last?.id else { return }
-        DispatchQueue.main.async {
-            if animated { withAnimation { proxy.scrollTo(target, anchor: .top) } }
-            else { proxy.scrollTo(target, anchor: .top) }
-        }
+        DispatchQueue.main.async { proxy.scrollTo(target, anchor: .top) }
     }
 
-    /// أعلى المحادثة: عنوانها + المحادثات + تحديث
-    private var controls: some View {
+    /// أعلى المحادثة: المحادثات، فهرس الأسئلة، تحديث، حجم الخط، لآخر سؤال
+    private func controls(_ proxy: ScrollViewProxy) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 NavigationLink {
                     ConversationList()
                 } label: {
-                    Label("المحادثات", systemImage: "list.bullet")
-                        .font(.footnote)
+                    Label("المحادثات", systemImage: "bubble.left.and.bubble.right")
+                        .font(.system(size: 13))
+                        .lineLimit(1)
                 }
+                NavigationLink {
+                    QuestionsIndex()
+                } label: {
+                    Label("الأسئلة", systemImage: "list.number")
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                }
+            }
+            HStack(spacing: 6) {
                 Button {
                     store.requestLatest()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .frame(width: 44)
+                Button {
+                    let index = sizes.firstIndex(of: textSize) ?? 1
+                    textSize = sizes[(index + 1) % sizes.count]
+                } label: {
+                    Text("Aa").font(.system(size: 14, weight: .semibold))
+                }
+                Button {
+                    jumpToLastQuestion(proxy)
+                } label: {
+                    Image(systemName: "arrow.down.to.line")
+                }
             }
-            .buttonStyle(.bordered)
+            .font(.system(size: 14))
 
             if !store.snapshot.title.isEmpty {
                 Text(store.snapshot.title)
-                    .font(.footnote.weight(.semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -122,6 +176,7 @@ struct ChatView: View {
                                  store.snapshot.title.prefersRightToLeft ? .rightToLeft : .leftToRight)
             }
         }
+        .buttonStyle(.bordered)
     }
 
     private var emptyState: some View {
@@ -150,16 +205,32 @@ struct ChatView: View {
 
 struct MessageRow: View {
     let message: ChatMessage
+    /// رد قديم يظهر مختصر
+    let collapsed: Bool
     /// يتغير عند وصول صورة جديدة، فيعاد رسم الرسالة
     let imagesVersion: Int
+    let failed: [String: String]
+    let onExpand: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !message.text.isEmpty {
-                MarkdownView(message.text)
-            }
-            ForEach(message.imageKeys, id: \.self) { key in
-                ChatImage(key: key, version: imagesVersion)
+            if collapsed {
+                if !message.text.isEmpty {
+                    MarkdownView(blocks: Self.preview(Markdown.parse(message.text)))
+                }
+                Button(action: onExpand) {
+                    Label(message.imageKeys.isEmpty ? "عرض الرد كامل" : "عرض الرد كامل · 🖼 \(message.imageKeys.count)",
+                          systemImage: "chevron.down")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+            } else {
+                if !message.text.isEmpty {
+                    MarkdownView(message.text)
+                }
+                ForEach(message.imageKeys, id: \.self) { key in
+                    ChatImage(key: key, version: imagesVersion, failure: failed[key])
+                }
             }
         }
         .padding(message.isUser ? 8 : 2)
@@ -168,12 +239,37 @@ struct MessageRow: View {
                 .fill(message.isUser ? Color.gray.opacity(0.3) : Color.clear)
         )
     }
+
+    /// أول جزء من الرد (حوالي 280 حرف) للعرض المختصر
+    static func preview(_ blocks: [MDBlock], limit: Int = 280) -> [MDBlock] {
+        var result: [MDBlock] = []
+        var used = 0
+        for block in blocks {
+            let length: Int
+            switch block {
+            case .paragraph(let t), .heading(_, let t), .quote(let t), .math(let t): length = t.count
+            case .code(_, let t): length = t.count
+            case .list(let items): length = items.reduce(0) { $0 + $1.text.count }
+            case .table(let h, let rows): length = (h + rows.flatMap { $0 }).joined().count
+            case .rule: length = 0
+            }
+            if used > 0 && used + length > limit { break }
+            if used == 0, length > limit, case .paragraph(let t) = block {
+                result.append(.paragraph(String(t.prefix(limit)) + "…"))
+                return result
+            }
+            result.append(block)
+            used += length
+        }
+        return result
+    }
 }
 
-/// صورة من المحادثة، أو مكان محجوز لها حتى تصل من الجوال
+/// صورة من المحادثة، أو مكان محجوز لها حتى تصل من الجوال (أو سبب فشلها)
 struct ChatImage: View {
     let key: String
     let version: Int
+    let failure: String?
 
     var body: some View {
         if let image = WatchImages.image(key) {
@@ -182,6 +278,13 @@ struct ChatImage: View {
                 .scaledToFit()
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } else if let failure {
+            Label("تعذّر عرض الصورة (\(failure))", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.15)))
         } else {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.gray.opacity(0.2))
@@ -194,6 +297,45 @@ struct ChatImage: View {
                     .foregroundStyle(.secondary)
                 )
         }
+    }
+}
+
+// MARK: - فهرس الأسئلة
+
+struct QuestionsIndex: View {
+    @EnvironmentObject private var store: WatchStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var questions: [ChatMessage] { store.snapshot.messages.filter(\.isUser) }
+
+    var body: some View {
+        List {
+            ForEach(Array(questions.enumerated()), id: \.element.id) { index, question in
+                Button {
+                    store.jumpTarget = question.id
+                    dismiss()
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.secondary)
+                        Text(Self.summary(question))
+                            .font(.system(size: 13))
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .environment(\.layoutDirection,
+                                 question.text.prefersRightToLeft ? .rightToLeft : .leftToRight)
+                }
+            }
+        }
+        .navigationTitle("الأسئلة")
+    }
+
+    static func summary(_ message: ChatMessage) -> String {
+        let flat = message.text.replacingOccurrences(of: "\n", with: " ")
+        if flat.isEmpty { return message.imageKeys.isEmpty ? "…" : "🖼 صورة" }
+        return String(flat.prefix(120))
     }
 }
 

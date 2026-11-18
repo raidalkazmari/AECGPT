@@ -26,6 +26,8 @@ final class ConversationService {
 
     /// آخر محادثة أُرسلت للساعة ووقت تحديثها
     private var shown: (id: String, updated: Double)?
+    /// روابط صور الإنترنت في المحادثة المعروضة
+    private var webImages: [String: String] = [:]
     private var loading: String?
     /// هل القراءة من الحساب شغّالة؟ لو تعطلت نرجع مؤقتًا لنسخ الصفحة
     private(set) var accountWorks = true
@@ -87,6 +89,7 @@ final class ConversationService {
                                     stamp: Date().timeIntervalSince1970,
                                     conversationId: conversation.id)
         shown = (conversation.id, conversation.updated)
+        webImages = conversation.webImages
         WatchLink.shared.update(snapshot)
         await sendImages(of: conversation)
     }
@@ -95,22 +98,37 @@ final class ConversationService {
     func fetchImages(_ keys: [String], conversationId: String) {
         run { [self] in
             for key in keys where !WatchLink.shared.hasImage(key) {
-                guard let data = try? await account.image(fileId: key, conversationId: conversationId),
-                      let image = UIImage(data: data),
-                      let jpeg = PhoneBridge.shrinkForWatch(image) else { continue }
-                WatchLink.shared.sendImage(key: key, jpeg: jpeg)
+                await deliver(key, conversationId: conversationId)
             }
         }
     }
 
-    /// الصور الناقصة: نحمّلها من حسابك، نصغّرها، ونرسلها (آخرها أولًا)
+    /// الصور الناقصة: نحمّلها، نصغّرها، ونرسلها (آخرها أولًا)
     private func sendImages(of conversation: ParsedConversation) async {
         let keys = conversation.messages.flatMap(\.imageKeys).reversed()
         for key in keys.prefix(30) where !WatchLink.shared.hasImage(key) {
-            guard let data = try? await account.image(fileId: key, conversationId: conversation.id),
-                  let image = UIImage(data: data),
-                  let jpeg = PhoneBridge.shrinkForWatch(image) else { continue }
+            await deliver(key, conversationId: conversation.id)
+        }
+    }
+
+    /// صورة واحدة: من حسابك أو من الإنترنت. لو فشلت نقول للساعة السبب بدل الانتظار
+    private func deliver(_ key: String, conversationId: String) async {
+        do {
+            let data: Data
+            if let link = webImages[key] {
+                data = try await account.webImage(link)
+            } else {
+                data = try await account.image(fileId: key, conversationId: conversationId)
+            }
+            guard let image = UIImage(data: data), let jpeg = PhoneBridge.shrinkForWatch(image) else {
+                WatchLink.shared.sendImageFailed(key, reason: "صيغة غير مدعومة")
+                return
+            }
             WatchLink.shared.sendImage(key: key, jpeg: jpeg)
+        } catch ChatGPTAccount.AccountError.http(let code) {
+            WatchLink.shared.sendImageFailed(key, reason: "خطأ \(code)")
+        } catch {
+            WatchLink.shared.sendImageFailed(key, reason: "تعذّر التحميل")
         }
     }
 

@@ -1,5 +1,17 @@
 import SwiftUI
 
+/// حجم الخط الأساسي للمحادثة (يتغير من زر Aa)
+private struct ChatTextSizeKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 14
+}
+
+extension EnvironmentValues {
+    var chatTextSize: CGFloat {
+        get { self[ChatTextSizeKey.self] }
+        set { self[ChatTextSizeKey.self] = newValue }
+    }
+}
+
 /// يعرض نص ChatGPT المنسّق على الساعة:
 /// عناوين، فقرات، قوائم (مرقمة ونقطية ومتداخلة)، كود، معادلات، اقتباس، جداول، فواصل.
 /// كل كتلة تأخذ اتجاهها (عربي يمين، إنجليزي يسار) حسب نصها.
@@ -8,6 +20,10 @@ struct MarkdownView: View {
 
     init(_ text: String) {
         blocks = Markdown.parse(text)
+    }
+
+    init(blocks: [MDBlock]) {
+        self.blocks = blocks
     }
 
     var body: some View {
@@ -22,17 +38,19 @@ struct MarkdownView: View {
 
 private struct BlockView: View {
     let block: MDBlock
+    @Environment(\.chatTextSize) private var size
 
     var body: some View {
         switch block {
         case .heading(let level, let text):
             Inline(text)
-                .font(level <= 2 ? Font.headline : Font.subheadline.weight(.semibold))
+                .font(.system(size: level <= 2 ? size + 2 : size + 1, weight: level <= 2 ? .bold : .semibold))
                 .padding(.top, level <= 2 ? 4 : 2)
                 .directional(text)
 
         case .paragraph(let text):
             Inline(text)
+                .font(.system(size: size))
                 .directional(text)
 
         case .list(let items):
@@ -40,9 +58,11 @@ private struct BlockView: View {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text(item.level == 0 ? item.marker : (item.marker == "•" ? "◦" : item.marker))
+                            .font(.system(size: size))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                         Inline(item.text)
+                            .font(.system(size: size))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.leading, CGFloat(item.level) * 10)
@@ -59,7 +79,7 @@ private struct BlockView: View {
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(text)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: size - 2, design: .monospaced))
                         .fixedSize(horizontal: true, vertical: false)
                 }
             }
@@ -71,7 +91,7 @@ private struct BlockView: View {
         case .math(let text):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text)
-                    .font(.system(size: 13, design: .monospaced))
+                    .font(.system(size: size - 2, design: .monospaced))
                     .fixedSize(horizontal: true, vertical: false)
             }
             .padding(6)
@@ -85,6 +105,7 @@ private struct BlockView: View {
                     .fill(Color.secondary)
                     .frame(width: 3)
                 Inline(text)
+                    .font(.system(size: size))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -104,6 +125,7 @@ private struct BlockView: View {
 private struct TableView: View {
     let header: [String]
     let rows: [[String]]
+    @Environment(\.chatTextSize) private var size
 
     var body: some View {
         let rtl = (header + rows.flatMap { $0 }).joined(separator: " ").prefersRightToLeft
@@ -111,14 +133,14 @@ private struct TableView: View {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 4) {
                 GridRow {
                     ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                        Inline(cell).font(.footnote.weight(.semibold))
+                        Inline(cell).font(.system(size: size - 1, weight: .semibold))
                     }
                 }
                 Divider()
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
                         ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            Inline(cell).font(.footnote)
+                            Inline(cell).font(.system(size: size - 1))
                         }
                     }
                 }

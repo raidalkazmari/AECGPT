@@ -7,6 +7,8 @@ struct ParsedConversation: Equatable {
     /// آخر تحديث بالملي ثانية
     let updated: Double
     let messages: [ChatMessage]
+    /// صور من الإنترنت (نتائج بحث، روابط صور في الرد): المفتاح ← الرابط
+    var webImages: [String: String] = [:]
 }
 
 /// يحوّل بيانات ChatGPT (JSON) إلى رسائل نظيفة للساعة.
@@ -53,8 +55,10 @@ enum ConversationParser {
         chain.reverse()
 
         var messages: [ChatMessage] = []
+        var webImages: [String: String] = [:]
         for message in chain {
             guard let piece = piece(from: message) else { continue }
+            for (key, url) in piece.web { webImages[key] = url }
             if piece.role == "assistant", let last = messages.last, last.role == "assistant" {
                 // أجزاء الرد الواحد (نص + صور أدوات) تُدمج في رسالة واحدة
                 let text = [last.text, piece.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -68,7 +72,8 @@ enum ConversationParser {
         }
         // رسالة فاضية تمامًا (بدون نص ولا صور) لا تُعرض
         messages.removeAll { $0.text.isEmpty && $0.imageKeys.isEmpty }
-        return ParsedConversation(id: id, title: title, updated: updated, messages: messages)
+        return ParsedConversation(id: id, title: title, updated: updated, messages: messages,
+                                  webImages: webImages)
     }
 
     // MARK: - رسالة واحدة
@@ -78,6 +83,7 @@ enum ConversationParser {
         let role: String
         let text: String
         let images: [String]
+        var web: [(String, String)] = []
     }
 
     private static func piece(from message: [String: Any]) -> Piece? {
@@ -102,8 +108,13 @@ enum ConversationParser {
             // رسائل موجهة لأداة (بحث، كود...) وليست لك
             guard recipient == "all" else { return nil }
             guard type == "text" || type == "multimodal_text" else { return nil } // تفكير، كود أدوات...
-            let (text, images) = textAndImages(content)
-            return Piece(id: id, role: "assistant", text: clean(text), images: images)
+            let (raw, images) = textAndImages(content)
+            // صور من الإنترنت: داخل النص ![...](رابط) أو مرفقة كنتائج بحث
+            let (text, inlineURLs) = extractMarkdownImages(raw)
+            let urls = dedupe(inlineURLs + referencedImageURLs(metadata)).prefix(8)
+            let web = urls.map { (webKey($0), $0) }
+            return Piece(id: id, role: "assistant", text: clean(text),
+                         images: images + web.map { $0.0 }, web: Array(web))
 
         case "tool":
             // نتائج الأدوات: نأخذ الصور فقط (صور مولّدة، رسوم بيانية من تحليل البيانات)
@@ -145,6 +156,58 @@ enum ConversationParser {
             return key.isEmpty ? nil : key
         }
         return pointer.hasPrefix("file") ? pointer : nil
+    }
+
+    // MARK: - صور من الإنترنت
+
+    private static let markdownImage = try! NSRegularExpression(
+        pattern: "!\\[[^\\]]*\\]\\((https?://[^)\\s]+)[^)]*\\)")
+
+    /// يشيل ![وصف](رابط) من النص ويرجع الروابط
+    static func extractMarkdownImages(_ text: String) -> (String, [String]) {
+        let range = NSRange(text.startIndex..., in: text)
+        let urls = markdownImage.matches(in: text, range: range).compactMap { match -> String? in
+            guard let r = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[r])
+        }
+        guard !urls.isEmpty else { return (text, []) }
+        let stripped = markdownImage.stringByReplacingMatches(in: text, range: range, withTemplate: "")
+        return (stripped, urls)
+    }
+
+    /// صور نتائج البحث المرفقة بالرد (مجموعات صور وبطاقات)
+    static func referencedImageURLs(_ metadata: [String: Any]) -> [String] {
+        guard let refs = metadata["content_references"] as? [[String: Any]] else { return [] }
+        var urls: [String] = []
+        for ref in refs {
+            let type = ((ref["type"] as? String) ?? "").lowercased()
+            guard type.contains("image") else { continue }
+            let images = (ref["images"] as? [[String: Any]]) ?? [ref]
+            for image in images {
+                for field in ["thumbnail_url", "image_url", "content_url", "url"] {
+                    if let url = image[field] as? String, url.hasPrefix("http") {
+                        urls.append(url)
+                        break
+                    }
+                }
+            }
+        }
+        return urls
+    }
+
+    /// مفتاح ثابت لصورة من رابط (يصلح كاسم ملف)
+    static func webKey(_ url: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in url.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return "web-" + String(hash, radix: 16)
+    }
+
+    private static func dedupe(_ items: [String]) -> [String] {
+        var seen = Set<String>()
+        return items.filter { seen.insert($0).inserted }
     }
 
     // MARK: - تنظيف النص

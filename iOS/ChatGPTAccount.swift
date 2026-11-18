@@ -43,7 +43,28 @@ final class ChatGPTAccount {
 
     /// يحمّل صورة من المحادثة (مرفوعة، مولّدة، أو رسم بياني)
     func image(fileId: String, conversationId: String) async throws -> Data {
-        let path = "/backend-api/files/download/\(fileId)?conversation_id=\(conversationId)&inline=false"
+        do {
+            return try await downloadFile("/backend-api/files/download/\(fileId)?conversation_id=\(conversationId)&inline=false")
+        } catch {
+            // محاولة ثانية بالطريقة الأخرى اللي يستخدمها ChatGPT لبعض الصور المولدة
+            if let data = try? await downloadFile("/backend-api/files/\(fileId)/download") { return data }
+            throw error
+        }
+    }
+
+    /// صورة من الإنترنت (نتائج بحث): لا تحتاج تسجيل دخول
+    func webImage(_ link: String) async throws -> Data {
+        guard let url = URL(string: link) else { throw AccountError.badResponse }
+        var request = URLRequest(url: url)
+        if let ua = userAgent { request.setValue(ua, forHTTPHeaderField: "User-Agent") }
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else { throw AccountError.http(code) }
+        return data
+    }
+
+    private func downloadFile(_ path: String) async throws -> Data {
         let info = try await get(path)
         guard let json = try JSONSerialization.jsonObject(with: info) as? [String: Any],
               let link = json["download_url"] as? String,
