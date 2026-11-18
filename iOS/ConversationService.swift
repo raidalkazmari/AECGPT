@@ -28,6 +28,7 @@ final class ConversationService {
     private var shown: (id: String, updated: Double)?
     /// روابط صور الإنترنت في المحادثة المعروضة
     private var webImages: [String: String] = [:]
+    private var webFallbacks: [String: [String]] = [:]
     private var loading: String?
     /// هل القراءة من الحساب شغّالة؟ لو تعطلت نرجع مؤقتًا لنسخ الصفحة
     private(set) var accountWorks = true
@@ -90,6 +91,7 @@ final class ConversationService {
                                     conversationId: conversation.id)
         shown = (conversation.id, conversation.updated)
         webImages = conversation.webImages
+        webFallbacks = conversation.webImageFallbacks
         WatchLink.shared.update(snapshot)
         await sendImages(of: conversation)
     }
@@ -111,25 +113,42 @@ final class ConversationService {
         }
     }
 
-    /// صورة واحدة: من حسابك أو من الإنترنت. لو فشلت نقول للساعة السبب بدل الانتظار
+    /// صورة واحدة: من حسابك أو من الإنترنت. لو فشلت نقول للساعة السبب بالضبط بدل الانتظار
     private func deliver(_ key: String, conversationId: String) async {
+        let fromWeb = webImages[key] != nil
+        let source = fromWeb ? "بحث" : "ChatGPT"
         do {
             let data: Data
             if let link = webImages[key] {
-                data = try await account.webImage(link)
+                data = try await firstWorking([link] + (webFallbacks[key] ?? []))
             } else {
                 data = try await account.image(fileId: key, conversationId: conversationId)
             }
             guard let image = UIImage(data: data), let jpeg = PhoneBridge.shrinkForWatch(image) else {
-                WatchLink.shared.sendImageFailed(key, reason: "صيغة غير مدعومة")
+                WatchLink.shared.sendImageFailed(key, reason: "\(source): صيغة غير مدعومة")
                 return
             }
             WatchLink.shared.sendImage(key: key, jpeg: jpeg)
-        } catch ChatGPTAccount.AccountError.http(let code) {
-            WatchLink.shared.sendImageFailed(key, reason: "خطأ \(code)")
+        } catch ChatGPTAccount.AccountError.http(let code, let detail) {
+            let id = fromWeb ? "" : " " + String(key.prefix(14))
+            WatchLink.shared.sendImageFailed(key, reason: "\(source) \(code)\(id)\(detail.isEmpty ? "" : " · " + detail)")
         } catch {
-            WatchLink.shared.sendImageFailed(key, reason: "تعذّر التحميل")
+            WatchLink.shared.sendImageFailed(key, reason: "\(source): \(error.localizedDescription.prefix(60))")
         }
+    }
+
+    /// يجرب روابط الصورة واحد واحد، ويرجع خطأ الأول لو كلها فشلت
+    private func firstWorking(_ links: [String]) async throws -> Data {
+        var firstError: Error?
+        for link in links {
+            do {
+                let data = try await account.webImage(link)
+                if UIImage(data: data) != nil { return data } // صفحة ويب وليست صورة: نكمل
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        throw firstError ?? ChatGPTAccount.AccountError.badResponse
     }
 
     /// يشغّل العملية، ويطلب من iOS وقتًا إضافيًا لو التطبيق في الخلفية

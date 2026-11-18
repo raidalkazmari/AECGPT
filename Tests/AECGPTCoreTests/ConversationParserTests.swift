@@ -130,6 +130,9 @@ final class ConversationParserTests: XCTestCase {
                               "https://img.example.com/t1.jpg",
                               "https://img.example.com/t2.jpg"])
         XCTAssertTrue(reply.imageKeys.allSatisfy { $0.hasPrefix("web-") && !$0.contains("/") })
+        // بديل لصورة البحث: لو المصغّرة رفضت، نجرب رابط الصفحة/الصورة الأصلية
+        XCTAssertEqual(c.webImageFallbacks[ConversationParser.webKey("https://img.example.com/t1.jpg")],
+                       ["https://site.com/page"])
         XCTAssertEqual(ConversationParser.webKey("https://a.com/x"), ConversationParser.webKey("https://a.com/x"))
         XCTAssertNotEqual(ConversationParser.webKey("https://a.com/x"), ConversationParser.webKey("https://a.com/y"))
     }

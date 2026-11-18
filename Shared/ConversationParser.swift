@@ -9,6 +9,8 @@ struct ParsedConversation: Equatable {
     let messages: [ChatMessage]
     /// صور من الإنترنت (نتائج بحث، روابط صور في الرد): المفتاح ← الرابط
     var webImages: [String: String] = [:]
+    /// روابط بديلة لنفس الصورة (لو الأول رفض)
+    var webImageFallbacks: [String: [String]] = [:]
 }
 
 /// يحوّل بيانات ChatGPT (JSON) إلى رسائل نظيفة للساعة.
@@ -56,9 +58,11 @@ enum ConversationParser {
 
         var messages: [ChatMessage] = []
         var webImages: [String: String] = [:]
+        var fallbacks: [String: [String]] = [:]
         for message in chain {
             guard let piece = piece(from: message) else { continue }
             for (key, url) in piece.web { webImages[key] = url }
+            for (key, urls) in piece.fallbacks { fallbacks[key] = urls }
             if piece.role == "assistant", let last = messages.last, last.role == "assistant" {
                 // أجزاء الرد الواحد (نص + صور أدوات) تُدمج في رسالة واحدة
                 let text = [last.text, piece.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -73,7 +77,7 @@ enum ConversationParser {
         // رسالة فاضية تمامًا (بدون نص ولا صور) لا تُعرض
         messages.removeAll { $0.text.isEmpty && $0.imageKeys.isEmpty }
         return ParsedConversation(id: id, title: title, updated: updated, messages: messages,
-                                  webImages: webImages)
+                                  webImages: webImages, webImageFallbacks: fallbacks)
     }
 
     // MARK: - رسالة واحدة
@@ -84,6 +88,7 @@ enum ConversationParser {
         let text: String
         let images: [String]
         var web: [(String, String)] = []
+        var fallbacks: [String: [String]] = [:]
     }
 
     private static func piece(from message: [String: Any]) -> Piece? {
@@ -111,10 +116,16 @@ enum ConversationParser {
             let (raw, images) = textAndImages(content)
             // صور من الإنترنت: داخل النص ![...](رابط) أو مرفقة كنتائج بحث
             let (text, inlineURLs) = extractMarkdownImages(raw)
-            let urls = dedupe(inlineURLs + referencedImageURLs(metadata)).prefix(8)
-            let web = urls.map { (webKey($0), $0) }
+            // كل صورة: رابطها الأول + بدائل
+            var candidates: [[String]] = inlineURLs.map { [$0] } + referencedImages(metadata)
+            var seen = Set<String>()
+            candidates = candidates.filter { $0.first.map { seen.insert($0).inserted } ?? false }
+            let chosen = candidates.prefix(8)
+            let web = chosen.map { (webKey($0[0]), $0[0]) }
+            var fallbacks: [String: [String]] = [:]
+            for urls in chosen where urls.count > 1 { fallbacks[webKey(urls[0])] = Array(urls.dropFirst()) }
             return Piece(id: id, role: "assistant", text: clean(text),
-                         images: images + web.map { $0.0 }, web: Array(web))
+                         images: images + web.map { $0.0 }, web: Array(web), fallbacks: fallbacks)
 
         case "tool":
             // نتائج الأدوات: نأخذ الصور فقط (صور مولّدة، رسوم بيانية من تحليل البيانات)
@@ -175,24 +186,30 @@ enum ConversationParser {
         return (stripped, urls)
     }
 
-    /// صور نتائج البحث المرفقة بالرد (مجموعات صور وبطاقات)
-    static func referencedImageURLs(_ metadata: [String: Any]) -> [String] {
+    /// صور نتائج البحث المرفقة بالرد (مجموعات صور وبطاقات): لكل صورة روابطها بالترتيب
+    static func referencedImages(_ metadata: [String: Any]) -> [[String]] {
         guard let refs = metadata["content_references"] as? [[String: Any]] else { return [] }
-        var urls: [String] = []
+        var result: [[String]] = []
         for ref in refs {
             let type = ((ref["type"] as? String) ?? "").lowercased()
             guard type.contains("image") else { continue }
             let images = (ref["images"] as? [[String: Any]]) ?? [ref]
             for image in images {
+                var urls: [String] = []
                 for field in ["thumbnail_url", "image_url", "content_url", "url"] {
-                    if let url = image[field] as? String, url.hasPrefix("http") {
+                    if let url = image[field] as? String, url.hasPrefix("http"), !urls.contains(url) {
                         urls.append(url)
-                        break
                     }
                 }
+                if !urls.isEmpty { result.append(urls) }
             }
         }
-        return urls
+        return result
+    }
+
+    /// للاختبارات: الرابط الأول لكل صورة
+    static func referencedImageURLs(_ metadata: [String: Any]) -> [String] {
+        referencedImages(metadata).map { $0[0] }
     }
 
     /// مفتاح ثابت لصورة من رابط (يصلح كاسم ملف)
