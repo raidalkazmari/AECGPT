@@ -1,8 +1,9 @@
 import UIKit
 import WebKit
 
-/// قلب تطبيق الجوال: يعرض chatgpt.com، يستقبل المحادثة من السكربت،
-/// ويسلّمها لـ WatchLink ليرسلها للساعة.
+/// قلب تطبيق الجوال: يعرض chatgpt.com (لتسجيل الدخول واختيار المحادثة).
+/// الساعة تأخذ المحادثة كاملة من حسابك عبر ConversationService، والصفحة تخبرنا فقط
+/// أي محادثة اخترت، ومتى يكتب ChatGPT.
 @MainActor
 final class PhoneBridge: NSObject, ObservableObject {
     let webView: WKWebView
@@ -14,16 +15,9 @@ final class PhoneBridge: NSObject, ObservableObject {
     private var needsReload = false
     private var retryScheduled = false
 
-    // ---- آخر محادثة في الحساب
-    private let manualKey = "manualChoiceAt"
-    /// آخر مرة اخترت فيها محادثة بنفسك من الجوال (ms). الأحدث منها في حسابك يفتح تلقائيًا.
-    private var manualAt: Double {
-        get { UserDefaults.standard.double(forKey: manualKey) }
-        set { UserDefaults.standard.set(newValue, forKey: manualKey) }
-    }
     private var lastSeenPath: String?
-    private var expectedAutoPath: String?
-    private var lastLatestCheck = Date.distantPast
+    /// ChatGPT يكتب ردًا الآن في الصفحة؟
+    private var pageStreaming = false
 
     override init() {
         let handler = ScriptHandler()
@@ -60,8 +54,6 @@ final class PhoneBridge: NSObject, ObservableObject {
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(watchOpened),
-                                               name: .aecgptWatchOpened, object: nil)
 
         loadStart()
     }
@@ -97,7 +89,28 @@ final class PhoneBridge: NSObject, ObservableObject {
     fileprivate func receive(_ body: Any) {
         guard let dict = body as? [String: Any] else { return }
 
-        // السكربت لم يجد الرسائل: نعرض وصف الصفحة على الساعة للتشخيص
+        // أي محادثة مفتوحة، وهل ChatGPT يكتب الآن
+        let path = dict["path"] as? String
+        if let path {
+            trackNavigation(path)
+            if path.contains("/c/") { UserDefaults.standard.set(path, forKey: lastPathKey) }
+        }
+        if dict["messages"] != nil {
+            let streaming = (dict["streaming"] as? Bool) ?? false
+            if streaming != pageStreaming {
+                pageStreaming = streaming
+                WatchLink.shared.sendTyping(streaming)
+                if !streaming, let id = path.flatMap(Self.conversationId) {
+                    ConversationService.shared.pageReplyFinished(conversationId: id)
+                }
+            }
+        }
+
+        // القراءة من الحساب شغّالة: هذا كل اللي نحتاجه من الصفحة
+        guard !ConversationService.shared.accountWorks else { return }
+
+        // ---- وضع احتياطي (القراءة من الحساب تعطلت): نرسل نسخة الصفحة كما كان سابقًا
+
         if let diagnostic = dict["diagnostic"] as? String {
             let snapshot = ChatSnapshot(title: "تشخيص",
                                         messages: [ChatMessage(id: "diagnostic", role: "assistant", text: diagnostic)],
@@ -107,7 +120,6 @@ final class PhoneBridge: NSObject, ObservableObject {
             return
         }
 
-        // صورة جاهزة (مصغّرة داخل الصفحة)، أو رابط صورة خارجية نحمّلها نحن
         if let key = dict["image"] as? String {
             if let b64 = dict["data"] as? String, let data = Data(base64Encoded: b64) {
                 WatchLink.shared.sendImage(key: key, jpeg: data)
@@ -118,7 +130,6 @@ final class PhoneBridge: NSObject, ObservableObject {
         }
 
         guard let rawMessages = dict["messages"] as? [[String: Any]] else { return }
-
         let messages: [ChatMessage] = rawMessages.compactMap { raw in
             guard let id = raw["id"] as? String,
                   let role = raw["role"] as? String,
@@ -127,55 +138,29 @@ final class PhoneBridge: NSObject, ObservableObject {
             return ChatMessage(id: id, role: role, text: text,
                                images: (images?.isEmpty ?? true) ? nil : images)
         }
-
-        if let path = dict["path"] as? String {
-            trackNavigation(path)
-            if path.contains("/c/") { UserDefaults.standard.set(path, forKey: lastPathKey) }
-        }
-
         let snapshot = ChatSnapshot(title: (dict["title"] as? String) ?? "",
                                     messages: messages,
                                     streaming: (dict["streaming"] as? Bool) ?? false,
-                                    stamp: Date().timeIntervalSince1970)
-
+                                    stamp: Date().timeIntervalSince1970,
+                                    conversationId: path.flatMap(Self.conversationId))
         guard !snapshot.hasSameContent(as: WatchLink.shared.latest) else { return }
         WatchLink.shared.update(snapshot)
     }
 
-    // MARK: - آخر محادثة في حساب ChatGPT
+    // MARK: - اختيارك من الجوال
 
-    /// تغيّر المسار: إما انتقال تلقائي منا، أو اختيارك أنت
+    /// انتقلت لمحادثة ثانية في الصفحة: تصير هي اللي في الساعة
     private func trackNavigation(_ path: String) {
         defer { lastSeenPath = path }
-        guard let previous = lastSeenPath, previous != path else { return }
-        if let expected = expectedAutoPath, path.contains(expected) {
-            expectedAutoPath = nil
-            return
-        }
-        manualAt = Date().timeIntervalSince1970 * 1000
+        guard let previous = lastSeenPath, previous != path,
+              let id = Self.conversationId(path) else { return }
+        ConversationService.shared.userChose(id)
     }
 
-    /// يفتح آخر محادثة تحدّثت في حسابك (من أي جهاز)، إلا إذا كان اختيارك اليدوي أحدث
-    func openLatestIfNewer() {
-        guard Date().timeIntervalSince(lastLatestCheck) > 8 else { return }
-        lastLatestCheck = Date()
-        webView.callAsyncJavaScript(
-            "return window.__aecgptLatest ? await window.__aecgptLatest(m) : null;",
-            arguments: ["m": manualAt],
-            in: nil,
-            in: .page
-        ) { [weak self] result in
-            guard let self,
-                  case .success(let value) = result,
-                  let id = value as? String, !id.isEmpty,
-                  let url = URL(string: self.home + "/c/" + id) else { return }
-            self.expectedAutoPath = "/c/" + id
-            self.webView.load(URLRequest(url: url))
-        }
-    }
-
-    @objc private func watchOpened() {
-        openLatestIfNewer()
+    static func conversationId(_ path: String) -> String? {
+        guard let range = path.range(of: "/c/") else { return nil }
+        let id = path[range.upperBound...].prefix { $0 != "/" && $0 != "?" && $0 != "#" }
+        return id.isEmpty ? nil : String(id)
     }
 
     // MARK: - صور من مواقع خارجية (مثل صور نتائج البحث)
@@ -188,7 +173,7 @@ final class PhoneBridge: NSObject, ObservableObject {
     }
 
     /// يصغّر الصورة لعرض شاشة الساعة، بخلفية بيضاء للرسوم الشفافة
-    private static func shrinkForWatch(_ image: UIImage) -> Data? {
+    static func shrinkForWatch(_ image: UIImage) -> Data? {
         let size = image.size
         guard size.width > 0, size.height > 0 else { return nil }
         let scale = min(1, 396 / size.width, 900 / size.height)
@@ -218,7 +203,7 @@ final class PhoneBridge: NSObject, ObservableObject {
     @objc private func willEnterForeground() {
         endBackgroundTask()
         // إذا تعطلت الصفحة وأنت خارج التطبيق، تُصلَح قبل أن تراها
-        if needsReload || webView.url == nil { recover() } else { openLatestIfNewer() }
+        if needsReload || webView.url == nil { recover() }
         WatchLink.shared.resend()
     }
 
@@ -265,9 +250,16 @@ extension PhoneBridge: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         needsReload = false
-        // بعد ما تجهز الصفحة: هل فيه محادثة أحدث في حسابك؟
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.openLatestIfNewer()
+        // نحفظ هوية المتصفح وتسجيل الدخول، حتى نقرأ من حسابك والتطبيق في الخلفية
+        webView.evaluateJavaScript("navigator.userAgent") { value, _ in
+            if let ua = value as? String { ChatGPTAccount.shared.userAgent = ua }
+        }
+        Task {
+            await ChatGPTAccount.shared.refreshCookies()
+            // أول مرة (أو بعد تسجيل الدخول): الساعة تاخذ آخر محادثة
+            if WatchLink.shared.latest.conversationId == nil {
+                ConversationService.shared.showLatest()
+            }
         }
     }
 

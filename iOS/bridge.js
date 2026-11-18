@@ -483,53 +483,6 @@
     if (!timer) timer = setTimeout(flush, delay);
   }
 
-  // ---- آخر محادثة في حساب ChatGPT (من أي جهاز)
-  // يسأل ChatGPT نفسه عن آخر محادثة تحدّثت، بنفس تسجيل الدخول الموجود في الصفحة.
-  // يرجع رقمها إذا كانت أحدث من آخر اختيار يدوي لك، وغير المفتوحة حاليًا.
-  const toMs = (t) => {
-    if (t == null) return 0;
-    if (typeof t === "number") return t < 1e12 ? t * 1000 : t;
-    const n = Number(t);
-    if (!isNaN(n)) return n < 1e12 ? n * 1000 : n;
-    const d = Date.parse(t);
-    return isNaN(d) ? 0 : d;
-  };
-
-  async function latestFromAccount() {
-    const session = await fetch("/api/auth/session", { credentials: "include" }).then((r) => r.json());
-    const token = session && session.accessToken;
-    if (!token) return null;
-    const res = await fetch("/backend-api/conversations?offset=0&limit=5&order=updated", {
-      credentials: "include",
-      headers: { Authorization: "Bearer " + token },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const items = ((data && data.items) || []).filter((c) => c && c.id && !c.is_archived);
-    if (!items.length) return null;
-    items.sort((a, b) => toMs(b.update_time) - toMs(a.update_time));
-    return { id: items[0].id, updated: toMs(items[0].update_time) };
-  }
-
-  // احتياط: أول محادثة في القائمة الجانبية (مرتبة من الأحدث)
-  function latestFromSidebar() {
-    const a = document.querySelector('nav a[href*="/c/"], aside a[href*="/c/"]');
-    const m = a && a.getAttribute("href").match(/\/c\/([^/?#]+)/);
-    return m ? { id: m[1], updated: 0 } : null;
-  }
-
-  window.__aecgptLatest = async (manualAt) => {
-    let latest = null;
-    try {
-      latest = await latestFromAccount();
-    } catch (e) {}
-    if (!latest && !manualAt) latest = latestFromSidebar(); // أول تشغيل فقط
-    if (!latest || latest.id === conversationId()) return null;
-    if (manualAt && latest.updated && latest.updated <= manualAt) return null; // اختيارك أحدث
-    if (manualAt && !latest.updated) return null;
-    return latest.id;
-  };
-
   // ---- تثبيت الصفحة
   // إذا كانت الصفحة أطول من الشاشة بشيء بسيط فقط (هوامش)، فهي واجهة ثابتة
   // والتمرير الحقيقي داخل المحادثة. نثبّتها في مكانها حتى لا تهتز فوق وتحت.

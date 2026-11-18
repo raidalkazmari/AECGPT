@@ -2,20 +2,21 @@ import UIKit
 import WatchConnectivity
 
 /// الاتصال بالساعة. يبدأ مع تشغيل التطبيق، حتى لو شغّلته الساعة في الخلفية.
-/// المحادثة تُرسل بطريقتين معًا:
-/// 1) فورًا إذا كانت الساعة مفتوحة (sendMessage)
-/// 2) نسخة محفوظة تصل للساعة حتى لو كانت نائمة (applicationContext)
-/// والصور تُرسل منفصلة: فورًا إن أمكن، وإلا كملف يصل لاحقًا (transferFile).
+/// - المحادثة: فورًا إن كانت الساعة مفتوحة، ونسخة محفوظة تصلها لو كانت نائمة.
+///   المحادثات الطويلة جدًا تُرسل كملف.
+/// - الصور: منفصلة، فورًا إن أمكن وإلا كملف.
 @MainActor
 final class WatchLink: NSObject {
     static let shared = WatchLink()
 
-    /// آخر محادثة. تُحفظ في الجوال، فتجدها الساعة حتى لو كان التطبيق مُغلقًا.
+    /// آخر محادثة أُرسلت. محفوظة في الجوال، فتجدها الساعة حتى لو كان التطبيق مُغلقًا.
     private(set) var latest: ChatSnapshot = .empty
     private var lastContextPush = Date.distantPast
     private var lastSave = Date.distantPast
 
     private let savedKey = "lastSnapshotForWatch"
+    /// أكبر حجم يُرسل كرسالة مباشرة (أكبر منه يُرسل كملف)
+    private let messageLimit = 60_000
 
     func start() {
         if let data = UserDefaults.standard.data(forKey: savedKey),
@@ -39,6 +40,21 @@ final class WatchLink: NSObject {
         push(latest, forceSave: true)
     }
 
+    /// "يكتب…" في أعلى الساعة أثناء كتابة الرد في الجوال
+    func sendTyping(_ typing: Bool) {
+        guard let session = readySession(), session.isReachable else { return }
+        session.sendMessage(["typing": typing], replyHandler: nil, errorHandler: nil)
+    }
+
+    func sendList(_ items: [ConversationItem]) {
+        guard let session = readySession(), let data = try? JSONEncoder().encode(items) else { return }
+        if session.isReachable {
+            session.sendMessage(["list": data], replyHandler: nil, errorHandler: nil)
+        } else {
+            session.transferUserInfo(["list": data])
+        }
+    }
+
     private func save(_ snapshot: ChatSnapshot) {
         let now = Date()
         // أثناء كتابة الرد نحفظ كل ثانيتين فقط، وعند اكتماله فورًا
@@ -51,18 +67,32 @@ final class WatchLink: NSObject {
     private func push(_ snapshot: ChatSnapshot, forceSave: Bool = false) {
         guard let session = readySession(), let data = snapshot.trimmed().packed() else { return }
 
-        let payload: [String: Any] = [ChatSnapshot.key: data]
+        if data.count > messageLimit {
+            sendSnapshotFile(data, session: session)
+            return
+        }
 
+        let payload: [String: Any] = [ChatSnapshot.key: data]
         if session.isReachable {
             session.sendMessage(payload, replyHandler: nil, errorHandler: nil)
         }
-
         // النسخة المحفوظة: فورًا عند اكتمال الرد، وكل ثانية أثناء الكتابة
         let now = Date()
         if forceSave || !snapshot.streaming || now.timeIntervalSince(lastContextPush) >= 1 {
             lastContextPush = now
             try? session.updateApplicationContext(payload)
         }
+    }
+
+    /// محادثة طويلة جدًا: ملف (بلا حد للحجم). نلغي أي ملف محادثة أقدم ما وصل بعد.
+    private func sendSnapshotFile(_ data: Data, session: WCSession) {
+        for transfer in session.outstandingFileTransfers where transfer.file.metadata?["snapshot"] != nil {
+            transfer.cancel()
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapshot-\(UUID().uuidString).bin")
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return }
+        session.transferFile(url, metadata: ["snapshot": true])
     }
 
     private func readySession() -> WCSession? {
@@ -87,6 +117,10 @@ final class WatchLink: NSObject {
         imageDir.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_") + ".jpg")
     }
 
+    func hasImage(_ key: String) -> Bool {
+        FileManager.default.fileExists(atPath: Self.imageURL(key).path)
+    }
+
     /// يحفظ الصورة في الجوال ويرسلها للساعة.
     func sendImage(key: String, jpeg: Data) {
         let url = Self.imageURL(key)
@@ -100,7 +134,7 @@ final class WatchLink: NSObject {
     private func deliverImage(key: String, url: URL, data: Data) {
         guard let session = readySession() else { return }
         // صغيرة والساعة مفتوحة: فورًا. وإلا ملف يصل حتى لو كانت الساعة نائمة
-        if session.isReachable && data.count < 60_000 {
+        if session.isReachable && data.count < messageLimit {
             session.sendMessage(["img": key, "data": data], replyHandler: nil) { _ in
                 Task { @MainActor in
                     _ = self.readySession()?.transferFile(url, metadata: ["img": key])
@@ -113,10 +147,18 @@ final class WatchLink: NSObject {
 
     /// الساعة طلبت صورًا ناقصة عندها
     fileprivate func resendImages(_ keys: [String]) {
+        var missing: [String] = []
         for key in keys.prefix(20) {
             let url = Self.imageURL(key)
-            guard let data = try? Data(contentsOf: url) else { continue }
-            deliverImage(key: key, url: url, data: data)
+            if let data = try? Data(contentsOf: url) {
+                deliverImage(key: key, url: url, data: data)
+            } else {
+                missing.append(key)
+            }
+        }
+        // ما هي عندنا بعد: نجيبها من حسابك
+        if !missing.isEmpty, let id = latest.conversationId {
+            ConversationService.shared.fetchImages(missing, conversationId: id)
         }
     }
 
@@ -157,22 +199,26 @@ extension WatchLink: WCSessionDelegate {
         Task { @MainActor in self.resend() }
     }
 
-    /// الساعة تسأل عند فتحها عن آخر محادثة، أو عن صور ناقصة.
-    /// إن كان التطبيق مُغلقًا، يشغّله iOS في الخلفية ويرد بالمحادثة المحفوظة.
+    /// طلبات الساعة. إن كان التطبيق مُغلقًا، يشغّله iOS في الخلفية ليرد.
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         let sync = message["sync"] != nil
+        let open = message["open"] as? String
+        let wantsList = message["list"] != nil
         let need = message["need"] as? [String] ?? []
         Task { @MainActor in
             if sync {
-                self.resend()
-                // الساعة انفتحت: نتأكد أنها على آخر محادثة في حسابك
-                NotificationCenter.default.post(name: .aecgptWatchOpened, object: nil)
+                self.resend()                              // الموجود فورًا
+                ConversationService.shared.showLatest()    // ثم آخر محادثة من حسابك
             }
+            if let open { ConversationService.shared.userChose(open) }
+            if wantsList { ConversationService.shared.sendRecentList() }
             if !need.isEmpty { self.resendImages(need) }
         }
     }
-}
 
-extension Notification.Name {
-    static let aecgptWatchOpened = Notification.Name("aecgptWatchOpened")
+    nonisolated func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
+        // ملفات المحادثة المؤقتة: نحذفها بعد الإرسال
+        guard fileTransfer.file.metadata?["snapshot"] != nil else { return }
+        try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
+    }
 }
