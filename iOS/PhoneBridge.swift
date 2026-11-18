@@ -94,13 +94,25 @@ final class PhoneBridge: NSObject, ObservableObject {
             return
         }
 
+        // صورة جاهزة (مصغّرة داخل الصفحة)، أو رابط صورة خارجية نحمّلها نحن
+        if let key = dict["image"] as? String {
+            if let b64 = dict["data"] as? String, let data = Data(base64Encoded: b64) {
+                WatchLink.shared.sendImage(key: key, jpeg: data)
+            } else if let link = dict["url"] as? String, let url = URL(string: link) {
+                Task { await Self.downloadImage(key: key, url: url) }
+            }
+            return
+        }
+
         guard let rawMessages = dict["messages"] as? [[String: Any]] else { return }
 
         let messages: [ChatMessage] = rawMessages.compactMap { raw in
             guard let id = raw["id"] as? String,
                   let role = raw["role"] as? String,
                   let text = raw["text"] as? String else { return nil }
-            return ChatMessage(id: id, role: role, text: text)
+            let images = raw["images"] as? [String]
+            return ChatMessage(id: id, role: role, text: text,
+                               images: (images?.isEmpty ?? true) ? nil : images)
         }
 
         if let path = dict["path"] as? String, path.contains("/c/") {
@@ -116,10 +128,37 @@ final class PhoneBridge: NSObject, ObservableObject {
         WatchLink.shared.update(snapshot)
     }
 
+    // MARK: - صور من مواقع خارجية (مثل صور نتائج البحث)
+
+    private static func downloadImage(key: String, url: URL) async {
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let image = UIImage(data: data),
+              let jpeg = shrinkForWatch(image) else { return }
+        await MainActor.run { WatchLink.shared.sendImage(key: key, jpeg: jpeg) }
+    }
+
+    /// يصغّر الصورة لعرض شاشة الساعة، بخلفية بيضاء للرسوم الشفافة
+    private static func shrinkForWatch(_ image: UIImage) -> Data? {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let scale = min(1, 396 / size.width, 900 / size.height)
+        let target = CGSize(width: max(1, (size.width * scale).rounded()),
+                            height: max(1, (size.height * scale).rounded()))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let rendered = UIGraphicsImageRenderer(size: target, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: target))
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
+        return rendered.jpegData(compressionQuality: 0.72)
+    }
+
     // MARK: - الخلفية وقفل الشاشة
 
     @objc private func didEnterBackground() {
-        WatchLink.shared.resendOrClear()
+        WatchLink.shared.resend()
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "AECGPT.sync") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
@@ -130,7 +169,7 @@ final class PhoneBridge: NSObject, ObservableObject {
         endBackgroundTask()
         // إذا تعطلت الصفحة وأنت خارج التطبيق، تُصلَح قبل أن تراها
         if needsReload || webView.url == nil { recover() }
-        WatchLink.shared.resendOrClear()
+        WatchLink.shared.resend()
     }
 
     private func endBackgroundTask() {

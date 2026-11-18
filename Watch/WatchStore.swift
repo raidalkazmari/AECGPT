@@ -8,6 +8,9 @@ final class WatchStore: NSObject, ObservableObject {
     @Published private(set) var snapshot: ChatSnapshot
     /// هل الجوال في المدى ويمكن الوصول له الآن؟
     @Published private(set) var isConnected = false
+    /// يزيد كلما وصلت صورة، فتتحدث الشاشة
+    @Published private(set) var imagesVersion = 0
+    private var lastNeedRequest = Date.distantPast
 
     private let storageKey = "lastSnapshot"
 
@@ -31,6 +34,21 @@ final class WatchStore: NSObject, ObservableObject {
               incoming.stamp >= snapshot.stamp else { return }   // نتجاهل أي نسخة أقدم
         snapshot = incoming
         UserDefaults.standard.set(data, forKey: storageKey)
+        requestMissingImages()
+    }
+
+    fileprivate func imageArrived() {
+        imagesVersion += 1
+    }
+
+    /// يطلب من الجوال الصور التي في المحادثة وليست عندنا (مرة كل 5 ثوانٍ كحد أقصى)
+    func requestMissingImages() {
+        let missing = snapshot.allImageKeys.filter { !WatchImages.has($0) }
+        guard !missing.isEmpty, Date().timeIntervalSince(lastNeedRequest) > 5 else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isReachable else { return }
+        lastNeedRequest = Date()
+        session.sendMessage(["need": Array(missing.suffix(20))], replyHandler: nil, errorHandler: nil)
     }
 
     /// يطلب من الجوال آخر نسخة (عند فتح التطبيق).
@@ -39,6 +57,8 @@ final class WatchStore: NSObject, ObservableObject {
         isConnected = session.activationState == .activated && session.isReachable
         guard session.activationState == .activated, session.isReachable else { return }
         session.sendMessage(["sync": true], replyHandler: nil, errorHandler: nil)
+        lastNeedRequest = .distantPast
+        requestMissingImages()
     }
 }
 
@@ -64,8 +84,20 @@ extension WatchStore: WCSessionDelegate {
     }
 
     nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        if let key = message["img"] as? String, let data = message["data"] as? Data {
+            WatchImages.save(key, data: data)
+            Task { @MainActor in self.imageArrived() }
+            return
+        }
         guard let data = message[ChatSnapshot.key] as? Data else { return }
         Task { @MainActor in self.apply(data) }
+    }
+
+    /// صورة وصلت كملف (والساعة كانت نائمة أو الصورة كبيرة)
+    nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
+        guard let key = file.metadata?["img"] as? String else { return }
+        WatchImages.saveFile(key, from: file.fileURL)
+        Task { @MainActor in self.imageArrived() }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {

@@ -47,7 +47,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(messages) { message in
-                        MessageRow(message: message)
+                        MessageRow(message: message, imagesVersion: store.imagesVersion)
                             .id(message.id)
                     }
                     if store.snapshot.streaming {
@@ -85,18 +85,54 @@ struct ChatView: View {
 
 struct MessageRow: View {
     let message: ChatMessage
+    /// يتغير عند وصول صورة جديدة، فيعاد رسم الرسالة
+    let imagesVersion: Int
 
     var body: some View {
-        Text(message.text)
-            .font(.body)
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(message.isUser ? 8 : 2)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(message.isUser ? Color.gray.opacity(0.3) : Color.clear)
-            )
-            .environment(\.layoutDirection,
-                         message.text.prefersRightToLeft ? .rightToLeft : .leftToRight)
+        VStack(alignment: .leading, spacing: 6) {
+            if !message.text.isEmpty {
+                Text(message.text)
+                    .font(.body)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .environment(\.layoutDirection,
+                                 message.text.prefersRightToLeft ? .rightToLeft : .leftToRight)
+            }
+            ForEach(message.imageKeys, id: \.self) { key in
+                ChatImage(key: key, version: imagesVersion)
+            }
+        }
+        .padding(message.isUser ? 8 : 2)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(message.isUser ? Color.gray.opacity(0.3) : Color.clear)
+        )
+    }
+}
+
+/// صورة من المحادثة، أو مكان محجوز لها حتى تصل من الجوال
+struct ChatImage: View {
+    let key: String
+    let version: Int
+
+    var body: some View {
+        if let image = WatchImages.image(key) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.gray.opacity(0.2))
+                .frame(height: 70)
+                .overlay(
+                    HStack(spacing: 6) {
+                        Image(systemName: "photo")
+                        ProgressView()
+                    }
+                    .foregroundStyle(.secondary)
+                )
+        }
     }
 }

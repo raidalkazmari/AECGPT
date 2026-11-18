@@ -141,6 +141,104 @@
     return c;
   }
 
+  // ---- الصور والرسومات
+  // نجمع صور كل رسالة، ونصغّرها لحجم الساعة داخل الصفحة نفسها
+  // (الصفحة مسجّلة دخول، فتقدر تحمّل صور ChatGPT المحمية).
+  const hashKey = (str) => {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(16) + "-" + str.length.toString(16);
+  };
+
+  const imageDone = new Set();   // أُرسلت للتطبيق
+  const imageTries = new Map();  // عدد المحاولات الفاشلة
+  const imageQueue = [];
+  let imageBusy = false;
+
+  function collectImages(scope) {
+    const keys = [];
+    if (!scope) return keys;
+    for (const img of scope.querySelectorAll("img")) {
+      const src = img.currentSrc || img.src || "";
+      if (!src || /^data:image\/svg/i.test(src)) continue;
+      const r = img.getBoundingClientRect();
+      const w = r.width || img.naturalWidth || 0;
+      const h = r.height || img.naturalHeight || 0;
+      if (w < 56 || h < 40) continue; // أيقونات المصادر والأزرار الصغيرة
+      const key = hashKey(src);
+      if (keys.includes(key)) continue;
+      keys.push(key);
+      queueImage(key, src);
+      if (keys.length >= 8) break;
+    }
+    return keys;
+  }
+
+  function queueImage(key, src) {
+    if (imageDone.has(key) || (imageTries.get(key) || 0) >= 3) return;
+    if (imageQueue.some((q) => q.key === key)) return;
+    imageQueue.push({ key, src });
+    pumpImages();
+  }
+
+  async function pumpImages() {
+    if (imageBusy) return;
+    imageBusy = true;
+    while (imageQueue.length) {
+      const { key, src } = imageQueue.shift();
+      try {
+        const data = await shrinkImage(src);
+        imageDone.add(key);
+        post({ image: key, data });
+      } catch (e) {
+        const tries = (imageTries.get(key) || 0) + 1;
+        imageTries.set(key, tries);
+        // صورة من موقع خارجي يرفض التحميل من الصفحة: التطبيق يحمّلها بنفسه
+        let external = false;
+        try { external = new URL(src, location.href).origin !== location.origin && /^https?:/i.test(src); } catch (_) {}
+        if (external) {
+          imageDone.add(key);
+          post({ image: key, url: new URL(src, location.href).href });
+        }
+      }
+    }
+    imageBusy = false;
+  }
+
+  async function loadBitmap(blob) {
+    if (window.createImageBitmap) return await createImageBitmap(blob);
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  async function shrinkImage(src) {
+    const res = await fetch(src, { credentials: "include" });
+    if (!res.ok) throw new Error("http " + res.status);
+    const blob = await res.blob();
+    if (blob.type && !/^image\//i.test(blob.type)) throw new Error("not image");
+    const bmp = await loadBitmap(blob);
+    const w = bmp.width, h = bmp.height;
+    if (!w || !h) throw new Error("empty");
+    const scale = Math.min(1, 396 / w, 900 / h); // عرض شاشة الساعة
+    const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; // الرسوم الشفافة تبان على خلفية الساعة السوداء
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(bmp, 0, 0, cw, ch);
+    if (bmp.close) bmp.close();
+    return canvas.toDataURL("image/jpeg", 0.72).split(",")[1];
+  }
+
   function byBubbles() {
     const root = conversationRoot() || document;
     const allUsers = outermost([...root.querySelectorAll(USER_SEL)], USER_SEL);
@@ -184,14 +282,16 @@
 
     const out = [];
     for (const g of groups) {
-      let node;
+      let node, scope;
       if (g.role === "user") {
-        node = g.nodes[0].querySelector(".whitespace-pre-wrap") || g.nodes[0];
+        scope = g.nodes[0];
+        node = scope.querySelector(".whitespace-pre-wrap") || scope;
       } else {
-        node = replyContainer(g.nodes, root);
+        node = scope = replyContainer(g.nodes, root);
       }
       const text = clean(textWithoutButtons(node));
-      if (text) out.push({ role: g.role, text });
+      const images = collectImages(scope);
+      if (text || images.length) out.push({ role: g.role, text, images });
     }
     // رقم المحادثة جزء من المعرّف، حتى تعرف الساعة أنها محادثة مختلفة
     const cid = conversationId();

@@ -5,8 +5,11 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: String   // "user" أو "assistant"
     let text: String
+    /// مفاتيح الصور في هذه الرسالة (الصور نفسها تُرسل للساعة كملفات منفصلة)
+    var images: [String]? = nil
 
     var isUser: Bool { role == "user" }
+    var imageKeys: [String] { images ?? [] }
 }
 
 /// نسخة كاملة من المحادثة المفتوحة حاليًا في الجوال.
@@ -19,6 +22,8 @@ struct ChatSnapshot: Codable, Equatable {
     var stamp: Double
 
     static let key = "snapshot"
+    /// كل مفاتيح الصور في المحادثة
+    var allImageKeys: [String] { messages.flatMap(\.imageKeys) }
     static let empty = ChatSnapshot(title: "", messages: [], streaming: false, stamp: 0)
 
     func hasSameContent(as other: ChatSnapshot) -> Bool {
@@ -36,7 +41,8 @@ struct ChatSnapshot: Codable, Equatable {
                 budget -= message.text.count
             } else {
                 kept.append(ChatMessage(id: message.id, role: message.role,
-                                        text: "…" + String(message.text.suffix(budget))))
+                                        text: "…" + String(message.text.suffix(budget)),
+                                        images: message.images))
                 budget = 0
             }
         }
