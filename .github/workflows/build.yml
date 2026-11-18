@@ -6,6 +6,17 @@ on:
     branches: [main]
 
 jobs:
+  test:
+    # يختبر قراءة المحادثات والتنسيق (يعمل على Linux، أسرع وما يحتاج Mac)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Unit tests
+        run: swift test 2>&1 | tail -80
+
   build:
     runs-on: macos-15
     timeout-minutes: 45

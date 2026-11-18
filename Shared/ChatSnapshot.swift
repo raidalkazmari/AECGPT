@@ -1,25 +1,14 @@
 import Foundation
 
-/// رسالة واحدة من المحادثة.
-struct ChatMessage: Codable, Identifiable, Equatable {
-    let id: String
-    let role: String   // "user" أو "assistant"
-    let text: String
-    /// مفاتيح الصور في هذه الرسالة (الصور نفسها تُرسل للساعة كملفات منفصلة)
-    var images: [String]? = nil
-
-    var isUser: Bool { role == "user" }
-    var imageKeys: [String] { images ?? [] }
-}
-
-/// نسخة كاملة من المحادثة المفتوحة حاليًا في الجوال.
-/// تُرسل للساعة كاملة في كل مرة، فلا يمكن أن تختلف الساعة عن الجوال.
+/// المحادثة المعروضة في الساعة، كاملة.
 struct ChatSnapshot: Codable, Equatable {
     var title: String
     var messages: [ChatMessage]
     var streaming: Bool
     /// وقت إنشاء النسخة. الساعة تتجاهل أي نسخة أقدم من التي عندها.
     var stamp: Double
+    /// رقم المحادثة في ChatGPT
+    var conversationId: String? = nil
 
     static let key = "snapshot"
     /// كل مفاتيح الصور في المحادثة
@@ -28,10 +17,11 @@ struct ChatSnapshot: Codable, Equatable {
 
     func hasSameContent(as other: ChatSnapshot) -> Bool {
         title == other.title && streaming == other.streaming && messages == other.messages
+            && conversationId == other.conversationId
     }
 
-    /// يحافظ على آخر الرسائل ضمن حد آمن لحجم ما يُرسل للساعة.
-    func trimmed(maxCharacters: Int = 60_000) -> ChatSnapshot {
+    /// حد أعلى لحجم المحادثة (محادثات طويلة جدًا: نبقي آخرها)
+    func trimmed(maxCharacters: Int = 250_000) -> ChatSnapshot {
         var budget = maxCharacters
         var kept: [ChatMessage] = []
         for message in messages.reversed() {
@@ -60,20 +50,5 @@ struct ChatSnapshot: Codable, Equatable {
     static func unpack(_ data: Data) -> ChatSnapshot? {
         guard let json = try? (data as NSData).decompressed(using: .lzfse) as Data else { return nil }
         return try? JSONDecoder().decode(ChatSnapshot.self, from: json)
-    }
-}
-
-extension String {
-    /// هل يبدأ النص بحرف عربي/عبري؟ لاختيار اتجاه العرض في الساعة.
-    var prefersRightToLeft: Bool {
-        for scalar in unicodeScalars {
-            switch scalar.value {
-            case 0x0590...0x08FF, 0xFB1D...0xFDFF, 0xFE70...0xFEFF:
-                return true
-            default:
-                if CharacterSet.letters.contains(scalar) { return false }
-            }
-        }
-        return false
     }
 }
