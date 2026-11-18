@@ -106,14 +106,14 @@ enum ConversationParser {
         switch role {
         case "user":
             guard type == "text" || type == "multimodal_text" else { return nil }
-            let (text, images) = textAndImages(content)
+            let (text, images) = textAndImages(content, metadata: metadata)
             return Piece(id: id, role: "user", text: clean(text), images: images)
 
         case "assistant":
             // رسائل موجهة لأداة (بحث، كود...) وليست لك
             guard recipient == "all" else { return nil }
             guard type == "text" || type == "multimodal_text" else { return nil } // تفكير، كود أدوات...
-            let (raw, images) = textAndImages(content)
+            let (raw, images) = textAndImages(content, metadata: metadata)
             // صور من الإنترنت: داخل النص ![...](رابط) أو مرفقة كنتائج بحث
             let (text, inlineURLs) = extractMarkdownImages(raw)
             // كل صورة: رابطها الأول + بدائل
@@ -129,7 +129,7 @@ enum ConversationParser {
 
         case "tool":
             // نتائج الأدوات: نأخذ الصور فقط (صور مولّدة، رسوم بيانية من تحليل البيانات)
-            var images = textAndImages(content).images
+            var images = textAndImages(content, metadata: metadata).images
             if let aggregate = metadata["aggregate_result"] as? [String: Any],
                let outputs = aggregate["messages"] as? [[String: Any]] {
                 for output in outputs where (output["message_type"] as? String) == "image" {
@@ -143,21 +143,67 @@ enum ConversationParser {
         }
     }
 
-    private static func textAndImages(_ content: [String: Any]) -> (text: String, images: [String]) {
+    private static func textAndImages(_ content: [String: Any],
+                                      metadata: [String: Any] = [:]) -> (text: String, images: [String]) {
         var texts: [String] = []
-        var images: [String] = []
+        var images: [String?] = []      // nil = صورة رقمها الحقيقي في المرفقات
+        var pointers: [String] = []
         for part in content["parts"] as? [Any] ?? [] {
             if let s = part as? String {
                 texts.append(s)
             } else if let obj = part as? [String: Any],
                       (obj["content_type"] as? String) == "image_asset_pointer",
-                      let pointer = obj["asset_pointer"] as? String,
-                      let key = fileKey(pointer) {
-                images.append(key)
+                      let pointer = obj["asset_pointer"] as? String {
+                if let key = fileKey(pointer), isFileId(key) {
+                    images.append(key)                       // sediment://file_… أو file-service://file-…
+                } else if let nested = findFileId(in: obj) {
+                    images.append(nested)                    // رقم الملف داخل بيانات الصورة
+                } else {
+                    images.append(nil)                       // الصور المرفوعة الجديدة: الرمز مختصر
+                    pointers.append(fileKey(pointer) ?? pointer)
+                }
             }
         }
+
+        // الصور اللي رمزها مختصر: رقمها الحقيقي (file_…) في قائمة مرفقات الرسالة، بنفس الترتيب
+        let used = Set(images.compactMap { $0 })
+        var attachments = ((metadata["attachments"] as? [[String: Any]]) ?? []).compactMap { a -> String? in
+            guard let id = a["id"] as? String, isFileId(id), !used.contains(id) else { return nil }
+            let mime = ((a["mime_type"] as? String) ?? "").lowercased()
+            return mime.isEmpty || mime.hasPrefix("image") ? id : nil
+        }
+        var pointerIndex = 0
+        let resolved: [String] = images.map { key in
+            if let key { return key }
+            defer { pointerIndex += 1 }
+            if !attachments.isEmpty { return attachments.removeFirst() }
+            return pointers[pointerIndex]   // ما لقينا: نجرب الرمز (والساعة تعرض السبب لو رفض)
+        }
+
         if texts.isEmpty, let s = content["text"] as? String { texts.append(s) }
-        return (texts.joined(separator: "\n\n"), images)
+        return (texts.joined(separator: "\n\n"), resolved)
+    }
+
+    static func isFileId(_ id: String) -> Bool {
+        id.hasPrefix("file-") || id.hasPrefix("file_")
+    }
+
+    /// يدور على رقم ملف (file-… أو file_…) داخل بيانات الصورة
+    private static func findFileId(in object: Any, depth: Int = 0) -> String? {
+        guard depth < 4 else { return nil }
+        if let dict = object as? [String: Any] {
+            for (key, value) in dict where key != "asset_pointer" {
+                if let s = value as? String, isFileId(s) { return s }
+            }
+            for value in dict.values {
+                if let found = findFileId(in: value, depth: depth + 1) { return found }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let found = findFileId(in: value, depth: depth + 1) { return found }
+            }
+        }
+        return nil
     }
 
     /// "file-service://file-abc" أو "sediment://file_xyz" → رقم الملف

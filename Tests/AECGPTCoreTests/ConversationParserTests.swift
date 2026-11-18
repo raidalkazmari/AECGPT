@@ -137,6 +137,30 @@ final class ConversationParserTests: XCTestCase {
         XCTAssertNotEqual(ConversationParser.webKey("https://a.com/x"), ConversationParser.webKey("https://a.com/y"))
     }
 
+    /// الصور المرفوعة الجديدة: الرابط فيه رمز مختصر، والرقم الحقيقي في المرفقات
+    func testUploadedImagesUseAttachmentIds() throws {
+        let json = """
+        {"title": "ورقة عمل", "conversation_id": "c3", "current_node": "u", "mapping": {
+          "u": {"id": "u", "parent": null, "children": [], "message": {"id": "u", "author": {"role": "user"},
+            "content": {"content_type": "multimodal_text", "parts": [
+              {"content_type": "image_asset_pointer", "asset_pointer": "sediment://d327ebb7aff2e0aa", "width": 900},
+              {"content_type": "image_asset_pointer", "asset_pointer": "sediment://6184638447e546bb"},
+              {"content_type": "image_asset_pointer", "asset_pointer": "sediment://abc", "metadata": {"source": {"file_id": "file_NESTED"}}},
+              {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_DIRECT"},
+              "حلها لي"]},
+            "metadata": {"attachments": [
+              {"id": "file_DIRECT", "mime_type": "image/png"},
+              {"id": "file_000AAA", "mime_type": "image/jpeg", "name": "1.jpg"},
+              {"id": "file-PDF", "mime_type": "application/pdf"},
+              {"id": "file_000BBB", "mime_type": "image/jpeg", "name": "2.jpg"}
+            ]}}}
+        }}
+        """
+        let c = try ConversationParser.parseConversation(Data(json.utf8))
+        XCTAssertEqual(c.messages[0].text, "حلها لي")
+        XCTAssertEqual(c.messages[0].imageKeys, ["file_000AAA", "file_000BBB", "file_NESTED", "file_DIRECT"])
+    }
+
     func testFileKeys() {
         XCTAssertEqual(ConversationParser.fileKey("file-service://file-abc"), "file-abc")
         XCTAssertEqual(ConversationParser.fileKey("sediment://file_00000000abc"), "file_00000000abc")
