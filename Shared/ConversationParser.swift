@@ -1,5 +1,13 @@
 import Foundation
 
+/// صورة أنشأها ChatGPT داخل مساحة عمله (مثل رسمة قصّها من ملف رفعته)
+struct SandboxImage: Equatable {
+    /// الرسالة اللي فيها الصورة (ChatGPT يطلبها عند التحميل)
+    let messageId: String
+    /// مثل /mnt/data/diagram.png
+    let path: String
+}
+
 /// محادثة كاملة مقروءة من حساب ChatGPT
 struct ParsedConversation: Equatable {
     let id: String
@@ -11,6 +19,8 @@ struct ParsedConversation: Equatable {
     var webImages: [String: String] = [:]
     /// روابط بديلة لنفس الصورة (لو الأول رفض)
     var webImageFallbacks: [String: [String]] = [:]
+    /// صور من مساحة عمل ChatGPT: المفتاح ← مكانها
+    var sandboxImages: [String: SandboxImage] = [:]
 }
 
 /// يحوّل بيانات ChatGPT (JSON) إلى رسائل نظيفة للساعة.
@@ -59,10 +69,12 @@ enum ConversationParser {
         var messages: [ChatMessage] = []
         var webImages: [String: String] = [:]
         var fallbacks: [String: [String]] = [:]
+        var sandbox: [String: SandboxImage] = [:]
         for message in chain {
             guard let piece = piece(from: message) else { continue }
             for (key, url) in piece.web { webImages[key] = url }
             for (key, urls) in piece.fallbacks { fallbacks[key] = urls }
+            for (key, image) in piece.sandbox { sandbox[key] = image }
             if piece.role == "assistant", let last = messages.last, last.role == "assistant" {
                 // أجزاء الرد الواحد (نص + صور أدوات) تُدمج في رسالة واحدة
                 let text = [last.text, piece.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -77,7 +89,8 @@ enum ConversationParser {
         // رسالة فاضية تمامًا (بدون نص ولا صور) لا تُعرض
         messages.removeAll { $0.text.isEmpty && $0.imageKeys.isEmpty }
         return ParsedConversation(id: id, title: title, updated: updated, messages: messages,
-                                  webImages: webImages, webImageFallbacks: fallbacks)
+                                  webImages: webImages, webImageFallbacks: fallbacks,
+                                  sandboxImages: sandbox)
     }
 
     // MARK: - رسالة واحدة
@@ -89,6 +102,7 @@ enum ConversationParser {
         let images: [String]
         var web: [(String, String)] = []
         var fallbacks: [String: [String]] = [:]
+        var sandbox: [String: SandboxImage] = [:]
     }
 
     private static func piece(from message: [String: Any]) -> Piece? {
@@ -115,17 +129,35 @@ enum ConversationParser {
             guard type == "text" || type == "multimodal_text" else { return nil } // تفكير، كود أدوات...
             let (raw, images) = textAndImages(content, metadata: metadata)
             // صور من الإنترنت: داخل النص ![...](رابط) أو مرفقة كنتائج بحث
-            let (text, inlineURLs) = extractMarkdownImages(raw)
-            // كل صورة: رابطها الأول + بدائل
-            var candidates: [[String]] = inlineURLs.map { [$0] } + referencedImages(metadata)
-            var seen = Set<String>()
-            candidates = candidates.filter { $0.first.map { seen.insert($0).inserted } ?? false }
-            let chosen = candidates.prefix(8)
-            let web = chosen.map { (webKey($0[0]), $0[0]) }
+            let (text, targets) = extractMarkdownImages(raw)
+            var keys = images
+            var web: [(String, String)] = []
             var fallbacks: [String: [String]] = [:]
-            for urls in chosen where urls.count > 1 { fallbacks[webKey(urls[0])] = Array(urls.dropFirst()) }
-            return Piece(id: id, role: "assistant", text: clean(text),
-                         images: images + web.map { $0.0 }, web: Array(web), fallbacks: fallbacks)
+            var sandbox: [String: SandboxImage] = [:]
+            var seen = Set<String>()
+
+            // صور داخل النص ![وصف](رابط): من الإنترنت، من ChatGPT، أو من مساحة عمله
+            for target in targets where keys.count < 12 {
+                if target.hasPrefix("sandbox:") {
+                    let path = String(target.dropFirst("sandbox:".count))
+                    let key = "sbx-" + webKey(id + path).dropFirst(4)
+                    guard seen.insert(key).inserted else { continue }
+                    sandbox[key] = SandboxImage(messageId: id, path: path)
+                    keys.append(key)
+                } else if let url = absoluteImageURL(target), seen.insert(url).inserted {
+                    web.append((webKey(url), url))
+                    keys.append(webKey(url))
+                }
+            }
+            // صور نتائج البحث: رابطها الأول + بدائل
+            for urls in referencedImages(metadata) where web.count < 8 && seen.insert(urls[0]).inserted {
+                let key = webKey(urls[0])
+                web.append((key, urls[0]))
+                keys.append(key)
+                if urls.count > 1 { fallbacks[key] = Array(urls.dropFirst()) }
+            }
+            return Piece(id: id, role: "assistant", text: clean(text), images: keys,
+                         web: web, fallbacks: fallbacks, sandbox: sandbox)
 
         case "tool":
             // نتائج الأدوات: نأخذ الصور فقط (صور مولّدة، رسوم بيانية من تحليل البيانات)
@@ -217,8 +249,16 @@ enum ConversationParser {
 
     // MARK: - صور من الإنترنت
 
+    /// ![وصف](رابط) — الرابط قد يكون https أو /backend-api/... أو sandbox:/mnt/data/ملف فيه مسافات
     private static let markdownImage = try! NSRegularExpression(
-        pattern: "!\\[[^\\]]*\\]\\((https?://[^)\\s]+)[^)]*\\)")
+        pattern: "!\\[[^\\]]*\\]\\(\\s*<?([^)>\"\\s][^)>\"]*?)>?\\s*(?:\"[^\"]*\")?\\s*\\)")
+
+    /// رابط صورة كامل: https كما هو، ومسار يبدأ بـ / يصير على chatgpt.com
+    static func absoluteImageURL(_ target: String) -> String? {
+        if target.hasPrefix("https://") || target.hasPrefix("http://") { return target }
+        if target.hasPrefix("/") { return "https://chatgpt.com" + target }
+        return nil
+    }
 
     /// يشيل ![وصف](رابط) من النص ويرجع الروابط
     static func extractMarkdownImages(_ text: String) -> (String, [String]) {

@@ -29,6 +29,7 @@ final class ConversationService {
     /// روابط صور الإنترنت في المحادثة المعروضة
     private var webImages: [String: String] = [:]
     private var webFallbacks: [String: [String]] = [:]
+    private var sandboxImages: [String: SandboxImage] = [:]
     private var loading: String?
     /// هل القراءة من الحساب شغّالة؟ لو تعطلت نرجع مؤقتًا لنسخ الصفحة
     private(set) var accountWorks = true
@@ -92,6 +93,7 @@ final class ConversationService {
         shown = (conversation.id, conversation.updated)
         webImages = conversation.webImages
         webFallbacks = conversation.webImageFallbacks
+        sandboxImages = conversation.sandboxImages
         WatchLink.shared.update(snapshot)
         await sendImages(of: conversation)
     }
@@ -116,10 +118,14 @@ final class ConversationService {
     /// صورة واحدة: من حسابك أو من الإنترنت. لو فشلت نقول للساعة السبب بالضبط بدل الانتظار
     private func deliver(_ key: String, conversationId: String) async {
         let fromWeb = webImages[key] != nil
-        let source = fromWeb ? "بحث" : "ChatGPT"
+        let sandbox = sandboxImages[key]
+        let source = sandbox != nil ? "ملف" : (fromWeb ? "بحث" : "ChatGPT")
         do {
             let data: Data
-            if let link = webImages[key] {
+            if let sandbox {
+                data = try await account.sandboxFile(conversationId: conversationId,
+                                                     messageId: sandbox.messageId, path: sandbox.path)
+            } else if let link = webImages[key] {
                 data = try await firstWorking([link] + (webFallbacks[key] ?? []))
             } else {
                 data = try await account.image(fileId: key, conversationId: conversationId)
@@ -130,7 +136,7 @@ final class ConversationService {
             }
             WatchLink.shared.sendImage(key: key, jpeg: jpeg)
         } catch ChatGPTAccount.AccountError.http(let code, let detail) {
-            let id = fromWeb ? "" : " " + String(key.prefix(14))
+            let id = (fromWeb || sandbox != nil) ? "" : " " + String(key.prefix(14))
             WatchLink.shared.sendImageFailed(key, reason: "\(source) \(code)\(id)\(detail.isEmpty ? "" : " · " + detail)")
         } catch {
             WatchLink.shared.sendImageFailed(key, reason: "\(source): \(error.localizedDescription.prefix(60))")

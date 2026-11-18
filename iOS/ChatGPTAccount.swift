@@ -78,9 +78,22 @@ final class ChatGPTAccount {
         }
     }
 
+    /// ملف أنشأه ChatGPT في مساحة عمله (مثل رسمة قصّها من ملفك): نفس طريقة موقع ChatGPT
+    func sandboxFile(conversationId: String, messageId: String, path: String) async throws -> Data {
+        referer = "https://chatgpt.com/c/\(conversationId)"
+        var components = URLComponents()
+        components.path = "/backend-api/conversation/\(conversationId)/interpreter/download"
+        components.queryItems = [URLQueryItem(name: "message_id", value: messageId),
+                                 URLQueryItem(name: "sandbox_path", value: path)]
+        guard let query = components.url?.absoluteString else { throw AccountError.badResponse }
+        return try await downloadFile(query)
+    }
+
     /// صورة من الإنترنت (نتائج بحث): لا تحتاج تسجيل دخول
     func webImage(_ link: String) async throws -> Data {
         guard let url = URL(string: link) else { throw AccountError.badResponse }
+        // صورة داخلية من ChatGPT نفسه: تحتاج تسجيل دخولك
+        if url.host?.hasSuffix("chatgpt.com") == true { return try await get(link) }
         var request = URLRequest(url: url)
         if let ua = userAgent { request.setValue(ua, forHTTPHeaderField: "User-Agent") }
         // نفس اللي يرسله المتصفح لما يعرض الصورة داخل ChatGPT

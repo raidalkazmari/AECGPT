@@ -161,6 +161,27 @@ final class ConversationParserTests: XCTestCase {
         XCTAssertEqual(c.messages[0].imageKeys, ["file_000AAA", "file_000BBB", "file_NESTED", "file_DIRECT"])
     }
 
+    /// رسمة قصّها ChatGPT من ملفك (sandbox) + صورة داخلية من ChatGPT
+    func testSandboxAndInternalImages() throws {
+        let json = """
+        {"title": "x", "conversation_id": "c4", "current_node": "a", "mapping": {
+          "u": {"id": "u", "parent": null, "children": ["a"], "message": {"id": "u", "author": {"role": "user"}, "content": {"content_type": "text", "parts": ["ارسم"]}}},
+          "a": {"id": "a", "parent": "u", "children": [], "message": {"id": "a", "author": {"role": "assistant"}, "recipient": "all",
+            "content": {"content_type": "text", "parts": ["هذه الرسمة:\\n\\n![Original Microcomputer Block Diagram](sandbox:/mnt/data/block diagram.png)\\n\\n[فتح الرسمة بجودة عالية](sandbox:/mnt/data/hd.png)\\n\\n![x](</backend-api/estuary/content?id=file_1&sig=abc> \\"title\\")"]}}}
+        }}
+        """
+        let c = try ConversationParser.parseConversation(Data(json.utf8))
+        let reply = c.messages[1]
+        XCTAssertFalse(reply.text.contains("Original Microcomputer"), reply.text)
+        XCTAssertTrue(reply.text.contains("[فتح الرسمة بجودة عالية]"), reply.text)
+        XCTAssertEqual(reply.imageKeys.count, 2)
+        let sbx = reply.imageKeys[0]
+        XCTAssertTrue(sbx.hasPrefix("sbx-"))
+        XCTAssertEqual(c.sandboxImages[sbx], SandboxImage(messageId: "a", path: "/mnt/data/block diagram.png"))
+        XCTAssertEqual(c.webImages[reply.imageKeys[1]],
+                       "https://chatgpt.com/backend-api/estuary/content?id=file_1&sig=abc")
+    }
+
     func testFileKeys() {
         XCTAssertEqual(ConversationParser.fileKey("file-service://file-abc"), "file-abc")
         XCTAssertEqual(ConversationParser.fileKey("sediment://file_00000000abc"), "file_00000000abc")
